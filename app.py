@@ -906,25 +906,28 @@ def render_day_phase():
     # ここでは st.form(enter_to_submit=False) + st.text_input を使い、
     # 見た目はほぼ同じ横並びの入力欄のまま、Enterキーでは絶対に送信されないようにしている
     # （送信は必ず送信ボタンを押した時のみ発生する）。
+    # さらに st.bottom コンテナに入れることで、st.chat_input と同じように
+    # 画面（アプリ本体）の一番下に常に固定表示されるようにしている。
     user_msg = None
     if not time_up:
-        with st.form(
-            key=f"chat_form_{st.session_state.day}",
-            clear_on_submit=True,
-            enter_to_submit=False,
-            border=False,
-        ):
-            col_input, col_btn = st.columns([6, 1], vertical_alignment="bottom")
-            with col_input:
-                draft = st.text_input(
-                    "発言を入力",
-                    key=f"chat_input_area_{st.session_state.day}",
-                    max_chars=150,
-                    label_visibility="collapsed",
-                    placeholder="発言を入力（150文字以内）...",
-                )
-            with col_btn:
-                submitted = st.form_submit_button("送信 ➤", type="primary", use_container_width=True)
+        with st.bottom:
+            with st.form(
+                key="chat_form",
+                clear_on_submit=True,
+                enter_to_submit=False,
+                border=False,
+            ):
+                col_input, col_btn = st.columns([6, 1], vertical_alignment="bottom")
+                with col_input:
+                    draft = st.text_input(
+                        "発言を入力",
+                        key=f"chat_input_area_{st.session_state.day}",
+                        max_chars=150,
+                        label_visibility="collapsed",
+                        placeholder="発言を入力（150文字以内）...",
+                    )
+                with col_btn:
+                    submitted = st.form_submit_button("送信 ➤", type="primary", use_container_width=True)
         if submitted and draft and draft.strip():
             user_msg = draft
 
