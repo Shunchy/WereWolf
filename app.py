@@ -56,7 +56,7 @@ AI_SPEAK_MAX_INTERVAL = 12       # AIが自発的に発言する最長間隔（�
 IDLE_CHECK_INTERVAL_MS = 4000    # 待機中にサーバー側で状態確認する間隔（ミリ秒）
 MULTI_SPEAK_CHANCE = 0.35        # 複数のAIが同時に発言を考え始める確率
 MAX_SIMULTANEOUS_SPEAKERS = 2    # 同時に発言を考えるAIの最大数
-LLM_TIMEOUT_SECONDS = 20         # OpenRouterへの通信タイムアウト（秒）
+LLM_TIMEOUT_SECONDS = 15         # OpenRouterへの通信タイムアウト（秒）
                                   # これが無いと、応答が返ってこない場合に「考え中」のまま
                                   # 永遠に待ち続けてしまう。
 
@@ -125,6 +125,7 @@ def call_llm(messages, max_tokens=300, temperature=0.9):
     except Exception as e:
         # LLM_TIMEOUT_SECONDS を超えると、ここで例外として捕捉され、
         # 「考え中」のまま止まることなく処理が先に進む。
+        _record_debug_error("LLM呼び出し", e)
         return f"[通信エラー: {e}]"
 
 
@@ -206,23 +207,57 @@ def generate_replies_concurrently(speakers, day, chat_log, alive_seats, seat_rol
     """
     複数のAIの発言を、実際に並行して(同時に)通信・生成する。
     完了した順に (seat, text) のタプルとして返す。
+
+    重要: ThreadPoolExecutorを `with` 文で使うと、ブロック終了時に
+    「まだ終わっていないスレッドの完了を待つ」処理(shutdown(wait=True))が
+    暗黙に走ってしまい、たとえ以下のタイムアウト処理が正しく働いていても、
+    結局そこで固まってしまう（これが「永遠に考え中」の真因だった）。
+    そのため、ここでは `with` を使わず、shutdown(wait=False) で
+    「返事が来なくても待たずに関数を抜ける」ようにしている。
+    取り残されたスレッドは、バックグラウンドで終わるか、やがて例外になるかする
+    だけで、以後の画面表示をブロックすることはない。
     """
     results = []
-    with ThreadPoolExecutor(max_workers=max(1, len(speakers))) as executor:
+    hard_timeout = LLM_TIMEOUT_SECONDS * 3 + 10  # リトライ3回分+余裕を持った絶対上限
+    executor = ThreadPoolExecutor(max_workers=max(1, len(speakers)))
+    try:
         future_to_seat = {
             executor.submit(
                 call_ai_chat_reply, seat_roles[seat], seat, day, chat_log, alive_seats
             ): seat
             for seat in speakers
         }
-        for future in as_completed(future_to_seat):
-            seat = future_to_seat[future]
-            try:
-                text = future.result()
-            except Exception as e:
-                text = f"（応答エラー: {e}）"
-            results.append((seat, text))
+        try:
+            for future in as_completed(future_to_seat, timeout=hard_timeout + 5):
+                seat = future_to_seat[future]
+                try:
+                    text = future.result(timeout=hard_timeout)
+                except Exception as e:
+                    text = random.choice(_FALLBACK_LINES)
+                    _record_debug_error(seat, e)
+                results.append((seat, text))
+        except Exception as e:
+            # as_completed自体が全体タイムアウトした場合もここで捕捉し、必ず先に進める
+            _record_debug_error("全体", e)
+
+        # 何らかの理由で結果が得られなかった座席は、必ずフォールバックで埋める
+        done_seats = {seat for seat, _ in results}
+        for future, seat in future_to_seat.items():
+            if seat not in done_seats:
+                results.append((seat, random.choice(_FALLBACK_LINES)))
+                _record_debug_error(seat, "全体タイムアウトにより打ち切り")
+    finally:
+        # wait=False: 未完了のスレッドを待たずに、ここで即座に関数を抜ける
+        executor.shutdown(wait=False, cancel_futures=True)
     return results
+
+
+def _record_debug_error(seat, error):
+    """画面下の「通信の状態」から確認できるよう、直近のエラーを保持しておく。"""
+    if "debug_errors" not in st.session_state:
+        st.session_state.debug_errors = []
+    st.session_state.debug_errors.append(f"{seat}: {error}")
+    st.session_state.debug_errors = st.session_state.debug_errors[-10:]
 
 
 # ======================================================================
@@ -465,6 +500,12 @@ def render_client_side_timer(deadline_epoch, total_seconds):
 
 
 def reset_game_button():
+    debug_errors = st.session_state.get("debug_errors", [])
+    if debug_errors:
+        with st.expander("⚠ 通信の状態（トラブルが起きている場合はここを確認）", expanded=False):
+            for line in debug_errors[-10:]:
+                st.caption(line)
+
     if st.button("🔄 ゲームをリセット", key="reset_btn"):
         for k in list(st.session_state.keys()):
             del st.session_state[k]
