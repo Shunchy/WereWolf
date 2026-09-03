@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 app.py
-UAI - Streamlit Webアプリ（自由チャット版・社会的推理ゲーム）
+逆人狼ゲーム（REVERSE WEREWOLF） - Streamlit Webアプリ（自由チャット版）
 
 役職構成（合計5名 / AI-01〜AI-05）:
   - 人間（プレイヤー）    × 1
@@ -20,7 +20,6 @@ UAI - Streamlit Webアプリ（自由チャット版・社会的推理ゲーム�
 
 import os
 import random
-import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -56,12 +55,9 @@ AI_SPEAK_MAX_INTERVAL = 12       # AIが自発的に発言する最長間隔（�
 IDLE_CHECK_INTERVAL_MS = 4000    # 待機中にサーバー側で状態確認する間隔（ミリ秒）
 MULTI_SPEAK_CHANCE = 0.35        # 複数のAIが同時に発言を考え始める確率
 MAX_SIMULTANEOUS_SPEAKERS = 2    # 同時に発言を考えるAIの最大数
-LLM_TIMEOUT_SECONDS = 15         # OpenRouterへの通信タイムアウト（秒）
-                                  # これが無いと、応答が返ってこない場合に「考え中」のまま
-                                  # 永遠に待ち続けてしまう。
 
 st.set_page_config(
-    page_title="UAI",
+    page_title="REVERSE WEREWOLF // 逆人狼",
     page_icon="◈",
     layout="centered",
 )
@@ -87,28 +83,11 @@ def get_client():
     return OpenAI(
         api_key=api_key,
         base_url=BASE_URL,
-        timeout=LLM_TIMEOUT_SECONDS,
         default_headers={
             "HTTP-Referer": "https://github.com/",
             "X-Title": "Reverse Werewolf Game",
         },
     )
-
-
-_JAPANESE_CHAR_RE = re.compile(r"[぀-ヿ一-鿿]")  # ひらがな・カタカナ・漢字の文字コード範囲
-
-# 何度リトライしても失敗した場合の、キャラクター性を壊さない自然なフォールバック発言
-_FALLBACK_LINES = [
-    "……少し考えがまとまりません。",
-    "うーん、うまく言葉にできませんでした。",
-    "今は静観します。",
-    "……ノイズが多くて、うまく聞き取れませんでした。",
-]
-
-
-def looks_japanese(text: str) -> bool:
-    """テキストに日本語の文字(ひらがな/カタカナ/漢字)が含まれているかを簡易判定する。"""
-    return bool(text) and bool(_JAPANESE_CHAR_RE.search(text))
 
 
 def call_llm(messages, max_tokens=300, temperature=0.9):
@@ -123,43 +102,16 @@ def call_llm(messages, max_tokens=300, temperature=0.9):
         content = resp.choices[0].message.content or ""
         return content.strip()
     except Exception as e:
-        # LLM_TIMEOUT_SECONDS を超えると、ここで例外として捕捉され、
-        # 「考え中」のまま止まることなく処理が先に進む。
-        _record_debug_error("LLM呼び出し", e)
         return f"[通信エラー: {e}]"
 
 
 def call_ai_chat_reply(role, seat_name, day, chat_log, alive_seats):
-    """
-    AIの発言を生成する。応答が空、または日本語になっていない場合は
-    最大2回まで「必ず日本語で」と念押しして再試行し、それでも駄目な場合は
-    「(応答なし)」のような不自然な文言ではなく、キャラクター性を保った
-    フォールバック発言を返す。
-    """
     messages = build_chat_reply_messages(role, seat_name, day, chat_log, alive_seats)
-    text = ""
-
-    for attempt in range(3):
-        raw = call_llm(messages, max_tokens=220, temperature=0.95)
-        candidate = raw.strip()
-
-        is_comm_error = candidate.startswith("[通信エラー")
-        if candidate and not is_comm_error and looks_japanese(candidate):
-            text = candidate
-            break
-
-        # 失敗した場合、次の試行では日本語出力を強く念押しする
-        messages = messages + [{
-            "role": "user",
-            "content": "重要: 必ず日本語のみで、150文字以内の1文を出力してください。英語や他の言語、空の返答は禁止です。",
-        }]
-
-    if not text:
-        text = random.choice(_FALLBACK_LINES)
-
+    text = call_llm(messages, max_tokens=220, temperature=0.95)
+    text = text.strip()
     if len(text) > 150:
         text = text[:148] + "…"
-    return text
+    return text if text else "（応答なし）"
 
 
 def call_ai_vote(role, seat_name, day, chat_log, candidates):
@@ -207,57 +159,23 @@ def generate_replies_concurrently(speakers, day, chat_log, alive_seats, seat_rol
     """
     複数のAIの発言を、実際に並行して(同時に)通信・生成する。
     完了した順に (seat, text) のタプルとして返す。
-
-    重要: ThreadPoolExecutorを `with` 文で使うと、ブロック終了時に
-    「まだ終わっていないスレッドの完了を待つ」処理(shutdown(wait=True))が
-    暗黙に走ってしまい、たとえ以下のタイムアウト処理が正しく働いていても、
-    結局そこで固まってしまう（これが「永遠に考え中」の真因だった）。
-    そのため、ここでは `with` を使わず、shutdown(wait=False) で
-    「返事が来なくても待たずに関数を抜ける」ようにしている。
-    取り残されたスレッドは、バックグラウンドで終わるか、やがて例外になるかする
-    だけで、以後の画面表示をブロックすることはない。
     """
     results = []
-    hard_timeout = LLM_TIMEOUT_SECONDS * 3 + 10  # リトライ3回分+余裕を持った絶対上限
-    executor = ThreadPoolExecutor(max_workers=max(1, len(speakers)))
-    try:
+    with ThreadPoolExecutor(max_workers=max(1, len(speakers))) as executor:
         future_to_seat = {
             executor.submit(
                 call_ai_chat_reply, seat_roles[seat], seat, day, chat_log, alive_seats
             ): seat
             for seat in speakers
         }
-        try:
-            for future in as_completed(future_to_seat, timeout=hard_timeout + 5):
-                seat = future_to_seat[future]
-                try:
-                    text = future.result(timeout=hard_timeout)
-                except Exception as e:
-                    text = random.choice(_FALLBACK_LINES)
-                    _record_debug_error(seat, e)
-                results.append((seat, text))
-        except Exception as e:
-            # as_completed自体が全体タイムアウトした場合もここで捕捉し、必ず先に進める
-            _record_debug_error("全体", e)
-
-        # 何らかの理由で結果が得られなかった座席は、必ずフォールバックで埋める
-        done_seats = {seat for seat, _ in results}
-        for future, seat in future_to_seat.items():
-            if seat not in done_seats:
-                results.append((seat, random.choice(_FALLBACK_LINES)))
-                _record_debug_error(seat, "全体タイムアウトにより打ち切り")
-    finally:
-        # wait=False: 未完了のスレッドを待たずに、ここで即座に関数を抜ける
-        executor.shutdown(wait=False, cancel_futures=True)
+        for future in as_completed(future_to_seat):
+            seat = future_to_seat[future]
+            try:
+                text = future.result()
+            except Exception as e:
+                text = f"（応答エラー: {e}）"
+            results.append((seat, text))
     return results
-
-
-def _record_debug_error(seat, error):
-    """画面下の「通信の状態」から確認できるよう、直近のエラーを保持しておく。"""
-    if "debug_errors" not in st.session_state:
-        st.session_state.debug_errors = []
-    st.session_state.debug_errors.append(f"{seat}: {error}")
-    st.session_state.debug_errors = st.session_state.debug_errors[-10:]
 
 
 # ======================================================================
@@ -372,63 +290,15 @@ def initialize_game():
     reset_day_state()
 
 
-if "screen" not in st.session_state:
-    st.session_state.screen = "title"  # "title" | "game"
-
-
-# ======================================================================
-# タイトル画面
-# ======================================================================
-def render_title_screen():
-    st.markdown(
-        """
-        <div style="text-align:center; padding: 48px 0 8px;">
-            <div style="font-family:'JetBrains Mono','Courier New',monospace;
-                        font-size:12px; letter-spacing:6px; color:#7fd3c7;
-                        margin-bottom:10px;">SOCIAL DEDUCTION SYSTEM</div>
-            <div style="font-family:'JetBrains Mono','Courier New',monospace;
-                        font-size:56px; font-weight:700; letter-spacing:10px;
-                        color:#e7ecf0;">UAI</div>
-            <div style="font-family:'JetBrains Mono','Courier New',monospace;
-                        font-size:12px; letter-spacing:3px; color:#8a939b;
-                        margin-top:6px;">U N I D E N T I F I E D · A I</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    st.divider()
-
-    st.markdown(
-        """
-5体のAI（AI-01〜AI-05）の中に、たった1人だけ紛れ込んだ「本物の人間」——それがあなたです。
-AIに擬態して、最後まで見破られずに生き残ってください。
-
-**役職構成（5名・非公開）**
-- 🧑 人間（あなた）× 1 —— AIに擬態して生き残るのが目的
-- 🤖 エミュレーター × 1 —— 人間のふりをして疑いを集める特殊AI。人間が生き残れば同時勝利
-- 🤖 一般AI × 3 —— 会話の矛盾から人間を見つけ出し、追放するのが目的
-
-**進行ルール**
-1. ☀ 自由議論フェーズ —— 制限時間内、決まったテーマはありません。自由にチャットしてください
-2. 🌙 投票フェーズ —— 全員が「人間だと思う相手」に投票し、最多票の1名が追放されます
-   （同数の場合は誰も追放されず、そのまま次の日へ進みます）
-
-人間が追放されれば一般AI側の勝利、生き残り続ければあなた（と、もしかしたらエミュレーター）の勝利です。
-        """
-    )
-
-    st.divider()
-    if st.button("▶ ゲームを開始する", type="primary", use_container_width=True):
-        initialize_game()
-        st.session_state.screen = "game"
-        st.rerun()
+if "seat_roles" not in st.session_state:
+    initialize_game()
 
 
 # ======================================================================
 # 共通表示ヘルパー
 # ======================================================================
 def render_header():
-    st.markdown("### ◈ UAI")
+    st.markdown("### ◈ REVERSE WEREWOLF // 逆人狼")
     phase_label = "☀ 自由議論" if st.session_state.phase == "day" else "🌙 投票"
     st.caption(
         f"あなたのID: **{st.session_state.human_seat}**　"
@@ -500,12 +370,6 @@ def render_client_side_timer(deadline_epoch, total_seconds):
 
 
 def reset_game_button():
-    debug_errors = st.session_state.get("debug_errors", [])
-    if debug_errors:
-        with st.expander("⚠ 通信の状態（トラブルが起きている場合はここを確認）", expanded=False):
-            for line in debug_errors[-10:]:
-                st.caption(line)
-
     if st.button("🔄 ゲームをリセット", key="reset_btn"):
         for k in list(st.session_state.keys()):
             del st.session_state[k]
@@ -733,10 +597,6 @@ def render_result():
 # メイン
 # ======================================================================
 def main():
-    if st.session_state.screen == "title":
-        render_title_screen()
-        return
-
     render_header()
 
     if not get_api_key():
