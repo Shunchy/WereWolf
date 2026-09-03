@@ -408,7 +408,8 @@ h1, h2, h3 {
 }
 
 /* ---- ボタン全般 ---- */
-div.stButton > button {
+div.stButton > button,
+div[data-testid="stFormSubmitButton"] > button {
     background-color: #14181d;
     color: #e7ecf0;
     border: 1px solid #3a4149;
@@ -417,9 +418,23 @@ div.stButton > button {
     font-family: 'JetBrains Mono', 'Courier New', monospace !important;
     transition: all 0.15s ease;
 }
-div.stButton > button:hover {
+div.stButton > button:hover,
+div[data-testid="stFormSubmitButton"] > button:hover {
     border-color: #7fd3c7;
     color: #7fd3c7;
+}
+
+/* ---- 発言入力欄（テキストエリア） ---- */
+div[data-testid="stTextArea"] textarea {
+    background-color: #101317;
+    color: #e7ecf0;
+    border: 1px solid #2a2f36;
+    border-radius: 6px;
+    font-family: 'JetBrains Mono', 'Courier New', monospace !important;
+}
+div[data-testid="stTextArea"] textarea:focus {
+    border-color: #7fd3c7;
+    box-shadow: 0 0 0 1px #7fd3c766;
 }
 
 /* ---- 投票カード ---- */
@@ -839,7 +854,7 @@ def render_day_phase():
     昼フェーズ（自由チャット・時間制限あり）。
 
     ポイント:
-    - 入力欄(st.chat_input)は「必ず毎回」呼び出す。AIが発言を生成中でも
+    - 入力欄(st.text_area + 送信ボタン)は「必ず毎回」呼び出す。AIが発言を生成中でも
       入力欄自体は常に画面に存在し続けるため、プレイヤーはいつでも発言できる。
       プレイヤーが発言した場合は、AIの発言予定より常に優先して処理される。
     - AIの発言はまず「誰が話すか」だけ決めて即座に再描画し、次の再描画で
@@ -881,9 +896,24 @@ def render_day_phase():
         render_statement_card(entry["seat"], entry["text"])
 
     # --- 0) 入力欄は必ず毎回呼び出す（AI生成中でも常に発言できるようにするため） ---
+    # st.chat_input は日本語IME変換中のEnterキー（変換確定）でも送信されてしまうことがあるため、
+    # ここでは st.text_area + 送信ボタンの組み合わせにしている。
+    # テキストエリアはEnterキーで改行されるだけで送信はされない（送信は必ずボタンを押した時のみ）ため、
+    # IME変換中にEnterを押しても誤送信されない。
     user_msg = None
     if not time_up:
-        user_msg = st.chat_input("発言を入力（150文字以内）...")
+        with st.form(key=f"chat_form_{st.session_state.day}", clear_on_submit=True):
+            draft = st.text_area(
+                "発言を入力",
+                key=f"chat_input_area_{st.session_state.day}",
+                max_chars=150,
+                height=80,
+                label_visibility="collapsed",
+                placeholder="発言を入力（150文字以内）...　※変換確定はEnter、送信は下のボタンを押してください",
+            )
+            submitted = st.form_submit_button("💬 送信する", type="primary", use_container_width=True)
+        if submitted and draft and draft.strip():
+            user_msg = draft
 
     # --- 1) プレイヤーが発言した場合は最優先で処理する ---
     if user_msg:
