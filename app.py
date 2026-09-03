@@ -424,17 +424,23 @@ div[data-testid="stFormSubmitButton"] > button:hover {
     color: #7fd3c7;
 }
 
-/* ---- 発言入力欄（テキストエリア） ---- */
-div[data-testid="stTextArea"] textarea {
+/* ---- 発言入力欄 ---- */
+div[data-testid="stTextArea"] textarea,
+div[data-testid="stTextInput"] input {
     background-color: #101317;
     color: #e7ecf0;
     border: 1px solid #2a2f36;
-    border-radius: 6px;
+    border-radius: 10px;
     font-family: 'JetBrains Mono', 'Courier New', monospace !important;
+    resize: none;
 }
-div[data-testid="stTextArea"] textarea:focus {
+div[data-testid="stTextArea"] textarea:focus,
+div[data-testid="stTextInput"] input:focus {
     border-color: #7fd3c7;
     box-shadow: 0 0 0 1px #7fd3c766;
+}
+div[data-testid="stFormSubmitButton"] > button {
+    border-radius: 10px;
 }
 
 /* ---- 投票カード ---- */
@@ -897,21 +903,28 @@ def render_day_phase():
 
     # --- 0) 入力欄は必ず毎回呼び出す（AI生成中でも常に発言できるようにするため） ---
     # st.chat_input は日本語IME変換中のEnterキー（変換確定）でも送信されてしまうことがあるため、
-    # ここでは st.text_area + 送信ボタンの組み合わせにしている。
-    # テキストエリアはEnterキーで改行されるだけで送信はされない（送信は必ずボタンを押した時のみ）ため、
-    # IME変換中にEnterを押しても誤送信されない。
+    # ここでは st.form(enter_to_submit=False) + st.text_input を使い、
+    # 見た目はほぼ同じ横並びの入力欄のまま、Enterキーでは絶対に送信されないようにしている
+    # （送信は必ず送信ボタンを押した時のみ発生する）。
     user_msg = None
     if not time_up:
-        with st.form(key=f"chat_form_{st.session_state.day}", clear_on_submit=True):
-            draft = st.text_area(
-                "発言を入力",
-                key=f"chat_input_area_{st.session_state.day}",
-                max_chars=150,
-                height=80,
-                label_visibility="collapsed",
-                placeholder="発言を入力（150文字以内）...　※変換確定はEnter、送信は下のボタンを押してください",
-            )
-            submitted = st.form_submit_button("💬 送信する", type="primary", use_container_width=True)
+        with st.form(
+            key=f"chat_form_{st.session_state.day}",
+            clear_on_submit=True,
+            enter_to_submit=False,
+            border=False,
+        ):
+            col_input, col_btn = st.columns([6, 1], vertical_alignment="bottom")
+            with col_input:
+                draft = st.text_input(
+                    "発言を入力",
+                    key=f"chat_input_area_{st.session_state.day}",
+                    max_chars=150,
+                    label_visibility="collapsed",
+                    placeholder="発言を入力（150文字以内）...",
+                )
+            with col_btn:
+                submitted = st.form_submit_button("送信 ➤", type="primary", use_container_width=True)
         if submitted and draft and draft.strip():
             user_msg = draft
 
