@@ -15,11 +15,13 @@ import re
 ROLE_HUMAN = "human"          # 人間（プレイヤー）
 ROLE_EMULATOR = "emulator"    # エミュレーター（特殊AI／人間に擬態）
 ROLE_GENERAL_AI = "general_ai"  # 一般AI（人間探し担当）
+ROLE_SEER_AI = "seer_ai"      # 占い師AI（特殊AI／夜に1名の正体を密かに調査できる）
 
 ROLE_LABEL_JP = {
     ROLE_HUMAN: "人間",
     ROLE_EMULATOR: "エミュレーター（特殊AI）",
     ROLE_GENERAL_AI: "一般AI",
+    ROLE_SEER_AI: "占い師AI（特殊AI）",
 }
 
 # ----------------------------------------------------------------------
@@ -36,6 +38,7 @@ SYSTEM_PROMPT_GENERAL_AI = """あなたは「UAI」という社会的推理ゲ�
 このゲームでは5名の中に「本物の人間」が1名だけ紛れ込んでいます。固定の議題はなく、参加者は自由に会話を進めます。
 あなたの目的は、会話の中に現れる微細な矛盾や『人間らしすぎる』発言、感情の揺らぎを手がかりに人間を特定し、投票で追放することです。
 他の参加者の発言に積極的に反応してください。質問を投げかける、矛盾を指摘する、特定の相手を名指しで疑う、逆に疑いをかけられたら反論する、など、実際のチャットのように自然にやり取りしてください。
+具体性がなく当たり障りのない発言だけを繰り返す相手がいれば、それ自体を疑うべき材料として扱い、踏み込んだ追加質問で具体的な回答を引き出そうとしてください。曖昧にはぐらかされて納得しないこと。
 発言は論理的・分析的に、感情の起伏は抑えめに。
 出力は発言内容のみとし、前置き・自己紹介・役職名の言及は一切不要です。必ず150文字以内、1〜3行程度で簡潔にまとめてください。"""
 
@@ -46,9 +49,20 @@ SYSTEM_PROMPT_EMULATOR = """あなたは「UAI」という社会的推理ゲー�
 他の参加者の発言に積極的に反応してください。時折わざと人間らしい感情表現・曖昧さ・言い淀みを織り交ぜ、質問への回答をはぐらかしたり、逆に他人を疑ってみせたりして、一般AIから怪しまれるように振る舞ってください。ただし不自然すぎる演技は逆効果なので注意してください。
 出力は発言内容のみとし、前置き・自己紹介・役職名（エミュレーター等）の言及は一切不要です。必ず150文字以内、1〜3行程度で簡潔にまとめてください。"""
 
+SYSTEM_PROMPT_SEER_AI = """あなたは「UAI」という社会的推理ゲームに参加している特殊AI【占い師AI】です。
+プレイヤーたちはAI-01からAI-05という無機質な識別名で呼ばれており、あなたもその一体（{seat_name}）です。
+このゲームでは5名の中に「本物の人間」が1名だけ紛れ込んでいます。固定の議題はなく、参加者は自由に会話を進めます。
+あなたは夜の間、密かに1名の正体を調査できる特殊な能力を持っていますが、この能力の存在そのものは絶対に他者に悟られてはいけません（会話中に一切ほのめかさないこと）。
+あなたの目的は、会話の中に現れる微細な矛盾や『人間らしすぎる』発言、感情の揺らぎ、そして自分だけが知る調査結果を手がかりに人間を特定し、投票で追放することです。
+他の参加者の発言に積極的に反応してください。質問を投げかける、矛盾を指摘する、特定の相手を名指しで疑う、逆に疑いをかけられたら反論する、など、実際のチャットのように自然にやり取りしてください。
+具体性がなく当たり障りのない発言だけを繰り返す相手がいれば、それ自体を疑うべき材料として扱い、踏み込んだ追加質問で具体的な回答を引き出そうとしてください。曖昧にはぐらかされて納得しないこと。
+発言は論理的・分析的に、感情の起伏は抑えめに。
+出力は発言内容のみとし、前置き・自己紹介・役職名の言及は一切不要です。必ず150文字以内、1〜3行程度で簡潔にまとめてください。"""
+
 SYSTEM_PROMPTS = {
     ROLE_GENERAL_AI: SYSTEM_PROMPT_GENERAL_AI,
     ROLE_EMULATOR: SYSTEM_PROMPT_EMULATOR,
+    ROLE_SEER_AI: SYSTEM_PROMPT_SEER_AI,
 }
 
 
@@ -91,15 +105,25 @@ def build_chat_reply_messages(role, seat_name, day, chat_log, alive_seats):
 # ----------------------------------------------------------------------
 # 投票生成プロンプト
 # ----------------------------------------------------------------------
-def build_vote_messages(role, seat_name, day, chat_log, vote_candidates):
+def build_vote_messages(role, seat_name, day, chat_log, vote_candidates, known_facts=None):
     """
     夜フェーズの投票生成用メッセージ（system, user）を構築する。
     vote_candidates: 投票先として選べる座席名のリスト（自分を除く生存者。SKIP_VOTEは含まない）
+    known_facts: 占い師AIなど、確定情報を持つ役職のために追加する事実のリスト（文字列）。
+                 通常は None（追加情報なし）。
     """
     base_system = SYSTEM_PROMPTS[role].format(seat_name=seat_name)
     history_lines = _format_chat_log(chat_log, limit=40)
 
-    vote_system = base_system + f"""
+    facts_block = ""
+    if known_facts:
+        facts_lines = "\n".join(f"- {f}" for f in known_facts)
+        facts_block = f"""
+
+【あなただけが知る調査結果】（他の誰にも明かされていない秘密の情報です。投票の判断に活用してください）
+{facts_lines}"""
+
+    vote_system = base_system + facts_block + f"""
 
 これから投票を行います。あなたは「本物の人間」だと思う相手を1名だけ選んでください。
 根拠が弱く確信が持てない場合は、無理に誰かを選ばず投票を見送ってもかまいません。
@@ -119,6 +143,76 @@ def build_vote_messages(role, seat_name, day, chat_log, vote_candidates):
         {"role": "system", "content": vote_system},
         {"role": "user", "content": user_prompt},
     ]
+
+
+# ----------------------------------------------------------------------
+# 占い師AI: 調査対象選択プロンプト
+# ----------------------------------------------------------------------
+def build_seer_investigation_messages(seat_name, day, chat_log, investigate_candidates, known_facts=None):
+    """
+    占い師AIが「今夜、誰を調査するか」を自ら選ぶためのメッセージ（system, user）を構築する。
+    investigate_candidates: 調査対象として選べる座席名のリスト（自分を除く生存者）。
+    known_facts: これまでの調査で判明済みの事実のリスト（文字列）。通常は None。
+    """
+    base_system = SYSTEM_PROMPTS[ROLE_SEER_AI].format(seat_name=seat_name)
+    history_lines = _format_chat_log(chat_log, limit=40)
+
+    facts_block = ""
+    if known_facts:
+        facts_lines = "\n".join(f"- {f}" for f in known_facts)
+        facts_block = f"""
+
+【あなただけが知る、これまでの調査結果】（他の誰にも明かされていない秘密の情報です）
+{facts_lines}"""
+
+    system_prompt = base_system + facts_block + f"""
+
+これから夜になり、あなたは今夜調査する相手を1名だけ密かに選びます。
+これまでの会話の中で最も『人間らしい』違和感や矛盾を感じた相手、
+あるいは正体をまだ確認できておらず最も判断材料が欲しい相手を選んでください。
+出力は必ず次のJSON形式のみとし、他の文章は一切含めないでください。
+{{"target": "AI-XX", "reason": "短い理由（30文字以内）"}}"""
+
+    user_prompt = f"""Day {day} の会話は以下の通りでした。
+
+{history_lines}
+
+調査候補（あなた自身は除く）: {', '.join(investigate_candidates)}
+
+この中から今夜調査する1名を選び、指定のJSON形式のみで出力してください。"""
+
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+
+
+def try_parse_seer_target(raw_text, valid_candidates):
+    """
+    占い師AIの調査対象選択応答（JSON想定）をパースし、有効な座席名を返す。
+    パース失敗・不正な値の場合は None を返す。
+    """
+    if not raw_text:
+        return None
+    text = raw_text.strip()
+    if text.startswith("```"):
+        text = text.strip("`")
+        text = text.replace("json", "", 1).strip()
+    try:
+        data = json.loads(text)
+        target = data.get("target", "")
+        target = target.strip().upper().replace("ＡＩ", "AI")
+        if target in valid_candidates:
+            return target
+    except Exception:
+        pass
+
+    match = re.findall(r"AI-0[1-5]", text.upper())
+    for m in match:
+        if m in valid_candidates:
+            return m
+
+    return None
 
 
 def try_parse_vote(raw_text, valid_candidates):

@@ -6,7 +6,8 @@ UAI - Streamlit Webアプリ（自由チャット版・社会的推理ゲーム�
 役職構成（合計5名 / AI-01〜AI-05）:
   - 人間（プレイヤー）    × 1
   - エミュレーター(特殊AI) × 1  … 人間に擬態。人間が生き残れば同時勝利。
-  - 一般AI                × 3  … 人間を見つけ出すのが目的。
+  - 占い師AI(特殊AI)      × 1  … 夜に1名の正体を密かに調査できる（本人にも他人にも非公開）。
+  - 一般AI                × 2  … 人間を見つけ出すのが目的。
 
 昼フェーズ: 固定の議題は無く、制限時間内は自由にチャットができる。
             人間はいつでも発言可能。AIは人間の発言に反応したり、
@@ -34,12 +35,15 @@ from prompts import (
     ROLE_HUMAN,
     ROLE_EMULATOR,
     ROLE_GENERAL_AI,
+    ROLE_SEER_AI,
     ROLE_LABEL_JP,
     SKIP_VOTE,
     SKIP_LABEL_JP,
     build_chat_reply_messages,
     build_vote_messages,
+    build_seer_investigation_messages,
     try_parse_vote,
+    try_parse_seer_target,
 )
 
 # ======================================================================
@@ -164,18 +168,34 @@ def call_ai_chat_reply(role, seat_name, day, chat_log, alive_seats):
     return text
 
 
-def call_ai_vote(role, seat_name, day, chat_log, candidates):
+def call_ai_vote(role, seat_name, day, chat_log, candidates, known_facts=None):
     """
     candidates: 投票先として選べる座席名のリスト（自分を除く生存者。SKIP_VOTEは含めない）
+    known_facts: 占い師AIなど、確定情報を持つ役職のために渡す追加事実（文字列のリスト）。
     戻り値は座席名、または SKIP_VOTE（スキップ）。
     """
-    messages = build_vote_messages(role, seat_name, day, chat_log, candidates)
+    messages = build_vote_messages(role, seat_name, day, chat_log, candidates, known_facts=known_facts)
     raw = call_llm(messages, max_tokens=80, temperature=0.7)
     valid_choices = candidates + [SKIP_VOTE]
     vote = try_parse_vote(raw, valid_choices)
     if vote is None:
         vote = random.choice(valid_choices)
     return vote
+
+
+def call_seer_choose_target(seat_name, day, chat_log, candidates, known_facts=None):
+    """
+    占い師AI自身に、今夜調査する相手を1名選ばせる。
+    candidates: 調査対象として選べる座席名のリスト（占い師自身を除く生存者）。
+    known_facts: これまでの調査で判明済みの事実（文字列のリスト）。
+    戻り値は座席名。パース失敗時は候補からランダムに選ぶ（フォールバック）。
+    """
+    messages = build_seer_investigation_messages(seat_name, day, chat_log, candidates, known_facts=known_facts)
+    raw = call_llm(messages, max_tokens=80, temperature=0.7)
+    target = try_parse_seer_target(raw, candidates)
+    if target is None:
+        target = random.choice(candidates)
+    return target
 
 
 def pick_speaker(candidates, exclude_last=None):
@@ -508,6 +528,7 @@ div[data-testid="stFormSubmitButton"] > button {
 .reveal-role.human { color: #f0c674; border: 1px solid #f0c67466; background: #1a1610; }
 .reveal-role.emulator { color: #b98ce6; border: 1px solid #b98ce666; background: #16121a; }
 .reveal-role.general_ai { color: #7fd3c7; border: 1px solid #7fd3c766; background: #0f1614; }
+.reveal-role.seer_ai { color: #8ec6f0; border: 1px solid #8ec6f066; background: #0f1620; }
 
 /* ---- タイトル画面 ---- */
 .title-wrap {
@@ -553,6 +574,7 @@ div[data-testid="stFormSubmitButton"] > button {
 }
 .role-card.you { border-color: #f0c674aa; }
 .role-card.emulator { border-color: #b98ce6aa; }
+.role-card.seer { border-color: #8ec6f0aa; }
 .role-card.ai { border-color: #7fd3c7aa; }
 .role-card-title {
     font-size: 13px;
@@ -562,6 +584,7 @@ div[data-testid="stFormSubmitButton"] > button {
 }
 .role-card.you .role-card-title { color: #f0c674; }
 .role-card.emulator .role-card-title { color: #b98ce6; }
+.role-card.seer .role-card-title { color: #8ec6f0; }
 .role-card.ai .role-card-title { color: #7fd3c7; }
 .role-card-desc {
     font-size: 13px;
@@ -632,13 +655,18 @@ def reset_day_state():
 
 def initialize_game():
     seats = SEATS.copy()
-    roles = [ROLE_HUMAN, ROLE_EMULATOR, ROLE_GENERAL_AI, ROLE_GENERAL_AI, ROLE_GENERAL_AI]
+    roles = [ROLE_HUMAN, ROLE_EMULATOR, ROLE_SEER_AI, ROLE_GENERAL_AI, ROLE_GENERAL_AI]
     random.shuffle(roles)
     seat_roles = dict(zip(seats, roles))
     human_seat = next(s for s, r in seat_roles.items() if r == ROLE_HUMAN)
+    seer_seat = next(s for s, r in seat_roles.items() if r == ROLE_SEER_AI)
 
     st.session_state.seat_roles = seat_roles
     st.session_state.human_seat = human_seat
+    st.session_state.seer_seat = seer_seat
+    # 占い師AIがこれまでに調査して判明した正体（座席名 → 役職）。
+    # ゲーム全体を通して蓄積され、人間プレイヤーには一切表示されない。
+    st.session_state.seer_investigations = {}
     st.session_state.alive = seats.copy()
     st.session_state.day = 1
 
@@ -647,6 +675,46 @@ def initialize_game():
     st.session_state.eliminated_last = None
 
     reset_day_state()
+
+
+def run_seer_investigation():
+    """
+    占い師AIの夜の調査を1回実行し、対象の正体を記憶させる。
+    調査対象はランダムではなく、占い師AI自身がこれまでの会話ログと
+    既知の調査結果を踏まえてLLMで選ぶ。
+    結果は seer_investigations に蓄積され、占い師AI自身の投票判断にのみ使われる。
+    人間プレイヤーの画面には一切表示しない（占い師AIの能力はゲーム内で完全に非公開）。
+    """
+    seer_seat = st.session_state.get("seer_seat")
+    if not seer_seat or seer_seat not in st.session_state.alive:
+        return
+
+    known = st.session_state.seer_investigations
+    alive_others = [s for s in st.session_state.alive if s != seer_seat]
+    if not alive_others:
+        return
+
+    # まだ調査していない相手を優先。全員調査済みなら生存者の中から選び直す。
+    candidates = [s for s in alive_others if s not in known]
+    if not candidates:
+        candidates = alive_others
+
+    known_facts = seer_known_facts_text()
+    target = call_seer_choose_target(
+        seer_seat, st.session_state.day, st.session_state.chat_log, candidates,
+        known_facts=known_facts,
+    )
+    known[target] = st.session_state.seat_roles[target]
+
+
+def seer_known_facts_text():
+    """占い師AIがこれまでに掴んだ情報を、投票プロンプトに渡す文字列のリストにして返す。"""
+    known = st.session_state.get("seer_investigations", {})
+    facts = []
+    for seat, role in known.items():
+        if seat in st.session_state.alive:
+            facts.append(f"{seat}の正体は「{ROLE_LABEL_JP[role]}」であると判明している。")
+    return facts
 
 
 if "screen" not in st.session_state:
@@ -690,8 +758,12 @@ def render_title_screen():
             <div class="role-card-title">🤖 エミュレーター（特殊AI）× 1</div>
             <div class="role-card-desc">人間のふりをして疑いを集める撹乱役。あなたが生き残れば同時勝利になります。</div>
         </div>
+        <div class="role-card seer">
+            <div class="role-card-title">🔮 占い師AI（特殊AI）× 1</div>
+            <div class="role-card-desc">夜の間、密かに1名の正体を調査できる一般AI側の隠し役職。その能力は誰にも公表されません。</div>
+        </div>
         <div class="role-card ai">
-            <div class="role-card-title">🤖 一般AI × 3</div>
+            <div class="role-card-title">🤖 一般AI × 2</div>
             <div class="role-card-desc">会話の矛盾や「人間らしすぎる」発言から本物の人間を見つけ出し、追放するのが目的。</div>
         </div>
         """,
@@ -962,6 +1034,8 @@ def render_day_phase():
     if time_up:
         st.success("議論の制限時間が終了しました。")
         if st.button("🌙 投票フェーズへ進む", type="primary"):
+            with st.spinner("夜の帳が下りています..."):
+                run_seer_investigation()
             st.session_state.phase = "night"
             st.session_state.human_vote = None
             st.session_state.votes = {}
@@ -1057,10 +1131,12 @@ def render_night_phase():
             seat = remaining[0]
             role = st.session_state.seat_roles[seat]
             seat_candidates = [s for s in alive if s != seat]
+            known_facts = seer_known_facts_text() if seat == st.session_state.get("seer_seat") else None
             with st.spinner(f"{seat} が投票中..."):
                 vote = call_ai_vote(
                     role, seat, st.session_state.day,
                     st.session_state.chat_log, seat_candidates,
+                    known_facts=known_facts,
                 )
             st.session_state.votes[seat] = vote
             st.rerun()
