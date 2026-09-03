@@ -23,6 +23,12 @@ ROLE_LABEL_JP = {
 }
 
 # ----------------------------------------------------------------------
+# 投票の「スキップ」選択肢
+# ----------------------------------------------------------------------
+SKIP_VOTE = "SKIP"                              # 内部的に扱うトークン
+SKIP_LABEL_JP = "誰にも投票しない（スキップ）"      # 画面表示用ラベル
+
+# ----------------------------------------------------------------------
 # 役職別システムプロンプト
 # ----------------------------------------------------------------------
 SYSTEM_PROMPT_GENERAL_AI = """あなたは「UAI」という社会的推理ゲームに参加している【一般AI】です。
@@ -88,24 +94,26 @@ def build_chat_reply_messages(role, seat_name, day, chat_log, alive_seats):
 def build_vote_messages(role, seat_name, day, chat_log, vote_candidates):
     """
     夜フェーズの投票生成用メッセージ（system, user）を構築する。
-    vote_candidates: 投票先として選べる座席名のリスト（自分を除く生存者）
+    vote_candidates: 投票先として選べる座席名のリスト（自分を除く生存者。SKIP_VOTEは含まない）
     """
     base_system = SYSTEM_PROMPTS[role].format(seat_name=seat_name)
     history_lines = _format_chat_log(chat_log, limit=40)
 
-    vote_system = base_system + """
+    vote_system = base_system + f"""
 
 これから投票を行います。あなたは「本物の人間」だと思う相手を1名だけ選んでください。
+根拠が弱く確信が持てない場合は、無理に誰かを選ばず投票を見送ってもかまいません。
 出力は必ず次のJSON形式のみとし、他の文章は一切含めないでください。
-{"vote": "AI-XX", "reason": "短い理由（30文字以内）"}"""
+{{"vote": "AI-XX または {SKIP_VOTE}", "reason": "短い理由（30文字以内）"}}"""
 
     user_prompt = f"""Day {day} の会話は以下の通りでした。
 
 {history_lines}
 
 投票候補（あなた自身は除く）: {', '.join(vote_candidates)}
+確信が持てない場合は "{SKIP_VOTE}" と出力して投票を見送ることもできます。
 
-この中から「本物の人間」だと思う1名を選び、指定のJSON形式のみで出力してください。"""
+この中から「本物の人間」だと思う1名を選ぶか "{SKIP_VOTE}" を選び、指定のJSON形式のみで出力してください。"""
 
     return [
         {"role": "system", "content": vote_system},
@@ -115,8 +123,9 @@ def build_vote_messages(role, seat_name, day, chat_log, vote_candidates):
 
 def try_parse_vote(raw_text, valid_candidates):
     """
-    AIの投票応答（JSON想定）をパースし、有効な座席名を返す。
+    AIの投票応答（JSON想定）をパースし、有効な座席名（または SKIP_VOTE）を返す。
     パース失敗・不正な値の場合は None を返す。
+    valid_candidates には投票可能な座席名に加え、SKIP_VOTE を含めることができる。
     """
     if not raw_text:
         return None
@@ -137,4 +146,8 @@ def try_parse_vote(raw_text, valid_candidates):
     for m in match:
         if m in valid_candidates:
             return m
+
+    if SKIP_VOTE in valid_candidates and SKIP_VOTE in text.upper():
+        return SKIP_VOTE
+
     return None

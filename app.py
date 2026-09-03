@@ -35,6 +35,8 @@ from prompts import (
     ROLE_EMULATOR,
     ROLE_GENERAL_AI,
     ROLE_LABEL_JP,
+    SKIP_VOTE,
+    SKIP_LABEL_JP,
     build_chat_reply_messages,
     build_vote_messages,
     try_parse_vote,
@@ -163,11 +165,16 @@ def call_ai_chat_reply(role, seat_name, day, chat_log, alive_seats):
 
 
 def call_ai_vote(role, seat_name, day, chat_log, candidates):
+    """
+    candidates: 投票先として選べる座席名のリスト（自分を除く生存者。SKIP_VOTEは含めない）
+    戻り値は座席名、または SKIP_VOTE（スキップ）。
+    """
     messages = build_vote_messages(role, seat_name, day, chat_log, candidates)
     raw = call_llm(messages, max_tokens=80, temperature=0.7)
-    vote = try_parse_vote(raw, candidates)
+    valid_choices = candidates + [SKIP_VOTE]
+    vote = try_parse_vote(raw, valid_choices)
     if vote is None:
-        vote = random.choice(candidates)
+        vote = random.choice(valid_choices)
     return vote
 
 
@@ -277,58 +284,306 @@ h1, h2, h3 {
     color: #e7ecf0 !important;
     font-weight: 700 !important;
 }
+
+/* ---- 発言カード（チャット吹き出し） ---- */
+.seat-row {
+    display: flex;
+    margin-bottom: 10px;
+}
+.seat-row.self { justify-content: flex-end; }
+.seat-row.ai { justify-content: flex-start; }
+
 .seat-card {
     border: 1px solid #2a2f36;
     background-color: #101317;
-    border-radius: 4px;
+    border-radius: 10px;
     padding: 10px 14px;
-    margin-bottom: 10px;
+    max-width: 78%;
+}
+.seat-card.self {
+    border-color: #f0c67466;
+    background-color: #14140f;
+    border-top-right-radius: 2px;
+}
+.seat-card.ai {
+    border-top-left-radius: 2px;
 }
 .seat-name {
-    font-size: 12px;
-    letter-spacing: 3px;
+    font-size: 11px;
+    letter-spacing: 2.5px;
     color: #7fd3c7;
     font-weight: 700;
     margin-bottom: 4px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
 }
 .seat-name.self {
     color: #f0c674;
+    justify-content: flex-end;
+}
+.seat-avatar {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: #1c2126;
+    border: 1px solid #33393f;
+    font-size: 10px;
 }
 .seat-text {
     font-size: 15px;
     color: #d7dbe0;
-    line-height: 1.5;
+    line-height: 1.6;
 }
+
+/* ---- ステータスバー（生存状況） ---- */
 .status-bar {
     display: flex;
     gap: 8px;
     flex-wrap: wrap;
-    margin-bottom: 16px;
+    margin-bottom: 14px;
 }
 .status-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
     border: 1px solid #2a2f36;
-    padding: 4px 10px;
+    background-color: #101317;
+    padding: 4px 12px;
     border-radius: 20px;
     font-size: 12px;
     letter-spacing: 1px;
-    color: #9aa4ad;
+    color: #b6bec6;
 }
+.status-chip .dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #4fd6a8;
+    box-shadow: 0 0 6px #4fd6a8aa;
+}
+.status-chip.self {
+    border-color: #f0c67488;
+    color: #f0c674;
+}
+.status-chip.self .dot { background: #f0c674; box-shadow: 0 0 6px #f0c674aa; }
 .status-chip.dead {
-    text-decoration: line-through;
     color: #4a4f55;
     border-color: #23272c;
+    background-color: #0c0e10;
 }
+.status-chip.dead .dot { background: #4a4f55; box-shadow: none; }
+.status-chip.dead .chip-label { text-decoration: line-through; }
+
+/* ---- フェーズバッジ ---- */
+.phase-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    border: 1px solid #23272c;
+    background-color: #101317;
+    border-radius: 8px;
+    padding: 10px 16px;
+    margin-bottom: 16px;
+}
+.phase-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    letter-spacing: 2px;
+    padding: 4px 12px;
+    border-radius: 20px;
+    font-weight: 700;
+}
+.phase-badge.day { color: #f0c674; border: 1px solid #f0c67466; background: #1a1610; }
+.phase-badge.night { color: #b98ce6; border: 1px solid #b98ce666; background: #16121a; }
+.phase-meta {
+    font-size: 12px;
+    color: #8a939b;
+    letter-spacing: 1px;
+}
+
+/* ---- ボタン全般 ---- */
 div.stButton > button {
     background-color: #14181d;
     color: #e7ecf0;
     border: 1px solid #3a4149;
-    border-radius: 4px;
+    border-radius: 6px;
     letter-spacing: 1px;
     font-family: 'JetBrains Mono', 'Courier New', monospace !important;
+    transition: all 0.15s ease;
 }
 div.stButton > button:hover {
     border-color: #7fd3c7;
     color: #7fd3c7;
+}
+
+/* ---- 投票カード ---- */
+.vote-card-selected {
+    border: 1px solid #f0c674 !important;
+    color: #f0c674 !important;
+    background-color: #1a1610 !important;
+}
+
+/* ---- 得票バー ---- */
+.tally-row {
+    margin-bottom: 10px;
+}
+.tally-label {
+    display: flex;
+    justify-content: space-between;
+    font-size: 13px;
+    color: #d7dbe0;
+    letter-spacing: 1px;
+    margin-bottom: 4px;
+}
+.tally-track {
+    height: 8px;
+    background: #1a1d21;
+    border-radius: 4px;
+    overflow: hidden;
+    border: 1px solid #23272c;
+}
+.tally-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #7fd3c7, #4fd6a8);
+    border-radius: 4px;
+}
+.tally-fill.max {
+    background: linear-gradient(90deg, #f0c674, #e0a94b);
+}
+.tally-fill.skip {
+    background: linear-gradient(90deg, #4a4f55, #6a7178);
+}
+
+/* ---- 役職公開カード ---- */
+.reveal-card {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    border: 1px solid #2a2f36;
+    background-color: #101317;
+    border-radius: 8px;
+    padding: 10px 16px;
+    margin-bottom: 8px;
+}
+.reveal-card.you { border-color: #f0c67488; }
+.reveal-seat {
+    font-size: 13px;
+    letter-spacing: 2px;
+    color: #e7ecf0;
+    font-weight: 700;
+}
+.reveal-role {
+    font-size: 12px;
+    letter-spacing: 1px;
+    padding: 3px 10px;
+    border-radius: 20px;
+}
+.reveal-role.human { color: #f0c674; border: 1px solid #f0c67466; background: #1a1610; }
+.reveal-role.emulator { color: #b98ce6; border: 1px solid #b98ce666; background: #16121a; }
+.reveal-role.general_ai { color: #7fd3c7; border: 1px solid #7fd3c766; background: #0f1614; }
+
+/* ---- タイトル画面 ---- */
+.title-wrap {
+    text-align: center;
+    padding: 56px 0 12px;
+    position: relative;
+}
+.title-eyebrow {
+    font-family: 'JetBrains Mono', 'Courier New', monospace;
+    font-size: 12px;
+    letter-spacing: 6px;
+    color: #7fd3c7;
+    margin-bottom: 14px;
+    opacity: 0.85;
+}
+.title-main {
+    font-family: 'JetBrains Mono', 'Courier New', monospace;
+    font-size: 62px;
+    font-weight: 700;
+    letter-spacing: 12px;
+    color: #e7ecf0;
+    text-shadow: 0 0 18px rgba(127, 211, 199, 0.45), 0 0 40px rgba(127, 211, 199, 0.15);
+    animation: uai-pulse 3.2s ease-in-out infinite;
+}
+.title-sub {
+    font-family: 'JetBrains Mono', 'Courier New', monospace;
+    font-size: 12px;
+    letter-spacing: 4px;
+    color: #8a939b;
+    margin-top: 10px;
+}
+@keyframes uai-pulse {
+    0%, 100% { text-shadow: 0 0 18px rgba(127, 211, 199, 0.45), 0 0 40px rgba(127, 211, 199, 0.15); }
+    50% { text-shadow: 0 0 28px rgba(127, 211, 199, 0.75), 0 0 60px rgba(127, 211, 199, 0.3); }
+}
+.role-card {
+    border: 1px solid #2a2f36;
+    background-color: #101317;
+    border-radius: 6px;
+    padding: 16px 18px;
+    margin-bottom: 12px;
+    text-align: left;
+}
+.role-card.you { border-color: #f0c674aa; }
+.role-card.emulator { border-color: #b98ce6aa; }
+.role-card.ai { border-color: #7fd3c7aa; }
+.role-card-title {
+    font-size: 13px;
+    letter-spacing: 2px;
+    font-weight: 700;
+    margin-bottom: 6px;
+}
+.role-card.you .role-card-title { color: #f0c674; }
+.role-card.emulator .role-card-title { color: #b98ce6; }
+.role-card.ai .role-card-title { color: #7fd3c7; }
+.role-card-desc {
+    font-size: 13px;
+    color: #9aa4ad;
+    line-height: 1.6;
+}
+.flow-step {
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+    border: 1px solid #23272c;
+    background-color: #0e1114;
+    border-radius: 6px;
+    padding: 12px 16px;
+    margin-bottom: 10px;
+}
+.flow-step-num {
+    font-family: 'JetBrains Mono', 'Courier New', monospace;
+    font-size: 18px;
+    font-weight: 700;
+    color: #7fd3c7;
+    min-width: 26px;
+}
+.flow-step-body-title {
+    font-size: 13px;
+    letter-spacing: 1px;
+    color: #e7ecf0;
+    font-weight: 700;
+    margin-bottom: 3px;
+}
+.flow-step-body-desc {
+    font-size: 13px;
+    color: #9aa4ad;
+    line-height: 1.6;
+}
+
+/* ---- 小見出し ---- */
+.section-label {
+    font-size: 12px;
+    letter-spacing: 2px;
+    color: #7fd3c7;
+    font-weight: 700;
+    margin: 4px 0 10px;
 }
 </style>
 """
@@ -351,6 +606,7 @@ def reset_day_state():
     st.session_state.votes_done = False
     st.session_state.pending_elimination = None
     st.session_state.tie_result = False
+    st.session_state.night_vote_draft = None
 
 
 def initialize_game():
@@ -382,42 +638,79 @@ if "screen" not in st.session_state:
 def render_title_screen():
     st.markdown(
         """
-        <div style="text-align:center; padding: 48px 0 8px;">
-            <div style="font-family:'JetBrains Mono','Courier New',monospace;
-                        font-size:12px; letter-spacing:6px; color:#7fd3c7;
-                        margin-bottom:10px;">SOCIAL DEDUCTION SYSTEM</div>
-            <div style="font-family:'JetBrains Mono','Courier New',monospace;
-                        font-size:56px; font-weight:700; letter-spacing:10px;
-                        color:#e7ecf0;">UAI</div>
-            <div style="font-family:'JetBrains Mono','Courier New',monospace;
-                        font-size:12px; letter-spacing:3px; color:#8a939b;
-                        margin-top:6px;">U N I D E N T I F I E D · A I</div>
+        <div class="title-wrap">
+            <div class="title-eyebrow">SOCIAL DEDUCTION SYSTEM</div>
+            <div class="title-main">UAI</div>
+            <div class="title-sub">U N I D E N T I F I E D &middot; A I</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
-    st.divider()
+    st.markdown(
+        """
+        <div style="text-align:center; color:#9aa4ad; font-size:14px;
+                    max-width:520px; margin:18px auto 0; line-height:1.8;">
+        5体のAI（AI-01〜AI-05）の中に、たった1人だけ紛れ込んだ「本物の人間」——それがあなたです。<br>
+        AIに擬態して、最後まで見破られずに生き残ってください。
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.write("")
+    st.markdown('<div class="section-label">◈ 役職構成（5名・非公開）</div>', unsafe_allow_html=True)
+    st.markdown(
+        """
+        <div class="role-card you">
+            <div class="role-card-title">🧑 人間（あなた）× 1</div>
+            <div class="role-card-desc">AIに擬態して生き残るのが目的。会話では「人間らしさ」を隠しきってください。</div>
+        </div>
+        <div class="role-card emulator">
+            <div class="role-card-title">🤖 エミュレーター（特殊AI）× 1</div>
+            <div class="role-card-desc">人間のふりをして疑いを集める撹乱役。あなたが生き残れば同時勝利になります。</div>
+        </div>
+        <div class="role-card ai">
+            <div class="role-card-title">🤖 一般AI × 3</div>
+            <div class="role-card-desc">会話の矛盾や「人間らしすぎる」発言から本物の人間を見つけ出し、追放するのが目的。</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.write("")
+    st.markdown('<div class="section-label">◈ 進行ルール</div>', unsafe_allow_html=True)
+    st.markdown(
+        f"""
+        <div class="flow-step">
+            <div class="flow-step-num">☀</div>
+            <div>
+                <div class="flow-step-body-title">自由議論フェーズ</div>
+                <div class="flow-step-body-desc">決まった議題はありません。制限時間内、自由にチャットして誰が人間かを探ってください。</div>
+            </div>
+        </div>
+        <div class="flow-step">
+            <div class="flow-step-num">🌙</div>
+            <div>
+                <div class="flow-step-body-title">投票フェーズ</div>
+                <div class="flow-step-body-desc">全員が「人間だと思う相手」に投票し、最多票の1名が追放されます。確信が持てなければ「{SKIP_LABEL_JP}」を選ぶこともできます（同数の場合や全員スキップの場合は誰も追放されず、次の日へ進みます）。</div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     st.markdown(
         """
-5体のAI（AI-01〜AI-05）の中に、たった1人だけ紛れ込んだ「本物の人間」——それがあなたです。
-AIに擬態して、最後まで見破られずに生き残ってください。
-
-**役職構成（5名・非公開）**
-- 🧑 人間（あなた）× 1 —— AIに擬態して生き残るのが目的
-- 🤖 エミュレーター × 1 —— 人間のふりをして疑いを集める特殊AI。人間が生き残れば同時勝利
-- 🤖 一般AI × 3 —— 会話の矛盾から人間を見つけ出し、追放するのが目的
-
-**進行ルール**
-1. ☀ 自由議論フェーズ —— 制限時間内、決まったテーマはありません。自由にチャットしてください
-2. 🌙 投票フェーズ —— 全員が「人間だと思う相手」に投票し、最多票の1名が追放されます
-   （同数の場合は誰も追放されず、そのまま次の日へ進みます）
-
-人間が追放されれば一般AI側の勝利、生き残り続ければあなた（と、もしかしたらエミュレーター）の勝利です。
-        """
+        <div style="text-align:center; color:#8a939b; font-size:12px;
+                    margin-top:8px; letter-spacing:1px;">
+        人間が追放されれば一般AI側の勝利、生き残り続ければあなた（と、もしかしたらエミュレーター）の勝利です。
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
-    st.divider()
+    st.write("")
+    st.write("")
     if st.button("▶ ゲームを開始する", type="primary", use_container_width=True):
         initialize_game()
         st.session_state.screen = "game"
@@ -428,29 +721,55 @@ AIに擬態して、最後まで見破られずに生き残ってください。
 # 共通表示ヘルパー
 # ======================================================================
 def render_header():
-    st.markdown("### ◈ UAI")
-    phase_label = "☀ 自由議論" if st.session_state.phase == "day" else "🌙 投票"
-    st.caption(
-        f"あなたのID: **{st.session_state.human_seat}**　"
-        f"｜ Day {st.session_state.day}　｜ フェーズ: {phase_label}"
+    st.markdown(
+        """
+        <div style="display:flex; align-items:center; gap:10px; margin-bottom:2px;">
+            <span style="font-size:20px; letter-spacing:3px; color:#e7ecf0; font-weight:700;">◈ UAI</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
+
+    phase = st.session_state.phase
+    phase_cls = "day" if phase == "day" else "night"
+    phase_label = "☀ 自由議論フェーズ" if phase == "day" else "🌙 投票フェーズ"
+    st.markdown(
+        f"""
+        <div class="phase-bar">
+            <span class="phase-badge {phase_cls}">{phase_label}</span>
+            <span class="phase-meta">DAY {st.session_state.day}　｜　あなたのID: {st.session_state.human_seat}</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
     chips = ""
     for s in SEATS:
         alive = s in st.session_state.alive
-        cls = "status-chip" if alive else "status-chip dead"
-        chips += f'<span class="{cls}">{s}</span>'
+        is_self = s == st.session_state.human_seat
+        cls = "status-chip"
+        if not alive:
+            cls += " dead"
+        elif is_self:
+            cls += " self"
+        label = s + ("（あなた）" if is_self and alive else "")
+        chips += f'<span class="{cls}"><span class="dot"></span><span class="chip-label">{label}</span></span>'
     st.markdown(f'<div class="status-bar">{chips}</div>', unsafe_allow_html=True)
-    st.divider()
 
 
 def render_statement_card(seat, text):
     is_self = seat == st.session_state.human_seat
+    row_cls = "seat-row self" if is_self else "seat-row ai"
+    card_cls = "seat-card self" if is_self else "seat-card ai"
     name_cls = "seat-name self" if is_self else "seat-name"
     suffix = "（あなた）" if is_self else ""
+    icon = "🧑" if is_self else "🤖"
     st.markdown(
-        f"""<div class="seat-card">
-                <div class="{name_cls}">🤖 {seat} {suffix}</div>
-                <div class="seat-text">{text}</div>
+        f"""<div class="{row_cls}">
+                <div class="{card_cls}">
+                    <div class="{name_cls}"><span class="seat-avatar">{icon}</span>{seat} {suffix}</div>
+                    <div class="seat-text">{text}</div>
+                </div>
             </div>""",
         unsafe_allow_html=True,
     )
@@ -641,13 +960,47 @@ def render_night_phase():
 
     # --- 1) プレイヤーの投票 ---
     if st.session_state.human_vote is None:
-        st.markdown("#### 「本物の人間」だと思う相手に投票してください")
-        choice = st.radio(
-            "投票先", candidates, label_visibility="collapsed", key=f"vote_radio_{st.session_state.day}"
+        st.markdown(
+            '<div class="section-label">◈ 「本物の人間」だと思う相手に投票してください</div>',
+            unsafe_allow_html=True,
         )
-        if st.button("🗳 投票を確定する", type="primary"):
-            st.session_state.human_vote = choice
-            st.session_state.votes[human_seat] = choice
+        st.caption("確信が持てない場合は、下の「スキップ」を選んで投票を見送ることもできます。")
+
+        if st.session_state.get("night_vote_draft") is None:
+            st.session_state.night_vote_draft = None
+
+        cols = st.columns(3)
+        for i, cand in enumerate(candidates):
+            with cols[i % 3]:
+                selected = st.session_state.night_vote_draft == cand
+                if st.button(
+                    ("✓ " if selected else "") + cand,
+                    key=f"vote_btn_{cand}_{st.session_state.day}",
+                    type="primary" if selected else "secondary",
+                    use_container_width=True,
+                ):
+                    st.session_state.night_vote_draft = cand
+                    st.rerun()
+
+        st.write("")
+        skip_selected = st.session_state.night_vote_draft == SKIP_VOTE
+        if st.button(
+            ("✓ " if skip_selected else "⏭ ") + SKIP_LABEL_JP,
+            key=f"vote_skip_{st.session_state.day}",
+            type="primary" if skip_selected else "secondary",
+            use_container_width=True,
+        ):
+            st.session_state.night_vote_draft = SKIP_VOTE
+            st.rerun()
+
+        st.write("")
+        draft = st.session_state.night_vote_draft
+        draft_label = SKIP_LABEL_JP if draft == SKIP_VOTE else draft
+        if draft:
+            st.caption(f"選択中: **{draft_label}**")
+        if st.button("🗳 投票を確定する", type="primary", disabled=(draft is None)):
+            st.session_state.human_vote = draft
+            st.session_state.votes[human_seat] = draft
             st.rerun()
         return
 
@@ -671,19 +1024,51 @@ def render_night_phase():
         return
 
     # --- 3) 開票 ---
-    st.markdown("#### 🗳 開票結果")
+    st.markdown('<div class="section-label">◈ 開票結果</div>', unsafe_allow_html=True)
+
     tally = {}
+    skip_count = 0
     for voter, target in st.session_state.votes.items():
-        tally[target] = tally.get(target, 0) + 1
+        if target == SKIP_VOTE:
+            skip_count += 1
+        else:
+            tally[target] = tally.get(target, 0) + 1
+
+    total_votes = len(st.session_state.votes)
+    max_votes = max(tally.values()) if tally else 0
+
+    def render_tally_bar(label, count, is_max=False, is_skip=False):
+        pct = int(round((count / total_votes) * 100)) if total_votes else 0
+        fill_cls = "tally-fill"
+        if is_skip:
+            fill_cls += " skip"
+        elif is_max and count > 0:
+            fill_cls += " max"
+        st.markdown(
+            f"""<div class="tally-row">
+                    <div class="tally-label"><span>{label}</span><span>{count}票</span></div>
+                    <div class="tally-track"><div class="{fill_cls}" style="width:{pct}%;"></div></div>
+                </div>""",
+            unsafe_allow_html=True,
+        )
 
     for seat in alive:
         count = tally.get(seat, 0)
-        st.write(f"　{seat} ： {'●' * count} {count}票")
+        render_tally_bar(seat, count, is_max=(max_votes > 0 and count == max_votes))
+    render_tally_bar(SKIP_LABEL_JP, skip_count, is_skip=True)
 
-    max_votes = max(tally.values()) if tally else 0
-    top_seats = [s for s, c in tally.items() if c == max_votes]
+    top_seats = [s for s, c in tally.items() if c == max_votes] if tally else []
 
-    if len(top_seats) >= 2:
+    if not top_seats:
+        # 誰にも投票が集まらなかった（全員スキップ）場合
+        st.session_state.tie_result = True
+        st.session_state.pending_elimination = None
+        st.info("有効な投票が誰にも集まらなかった（全員がスキップ）ため、今回は誰も追放されません。")
+        if st.button("➡ 次の日へ進む", type="primary"):
+            st.session_state.day += 1
+            reset_day_state()
+            st.rerun()
+    elif len(top_seats) >= 2:
         st.session_state.tie_result = True
         st.session_state.pending_elimination = None
         st.info(f"最多票が同数（{', '.join(top_seats)}）のため、今回は誰も追放されません。")
@@ -740,12 +1125,23 @@ def render_result():
 
     st.markdown(f"最後に追放されたのは **{st.session_state.eliminated_last}** でした。")
 
-    st.markdown("#### 🗂 全員の正体")
+    st.write("")
+    st.markdown('<div class="section-label">◈ 全員の正体</div>', unsafe_allow_html=True)
     for seat in SEATS:
         role = st.session_state.seat_roles[seat]
-        tag = "（あなた）" if seat == human_seat else ""
-        st.write(f"　{seat}{tag} ： {ROLE_LABEL_JP[role]}")
+        is_you = seat == human_seat
+        card_cls = "reveal-card you" if is_you else "reveal-card"
+        role_cls = f"reveal-role {role}"
+        tag = "（あなた）" if is_you else ""
+        st.markdown(
+            f"""<div class="{card_cls}">
+                    <span class="reveal-seat">{seat}{tag}</span>
+                    <span class="{role_cls}">{ROLE_LABEL_JP[role]}</span>
+                </div>""",
+            unsafe_allow_html=True,
+        )
 
+    st.write("")
     st.divider()
     if st.button("🔄 もう一度プレイする", type="primary"):
         for k in list(st.session_state.keys()):
