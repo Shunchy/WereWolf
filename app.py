@@ -63,6 +63,11 @@ load_dotenv()  # ローカル実行時: .env を読み込む
 MODEL_NAME = "openrouter/free"
 BASE_URL = "https://openrouter.ai/api/v1"
 
+# ---- 音声入力(STT / OpenRouter Whisper) 関連設定 ----
+# OpenRouterの /audio/transcriptions エンドポイント用モデル。
+# LLM呼び出しと同じ base_url・APIキーで叩けるため、専用のAPIキーは不要。
+DEFAULT_STT_MODEL_NAME = "openai/whisper-large-v3"
+
 SEATS = [f"AI-{i:02d}" for i in range(1, 6)]
 
 DAY_PHASE_SECONDS = 180          # 昼フェーズ（自由チャット）の制限時間（秒）
@@ -121,6 +126,45 @@ def get_client():
             "X-Title": "Reverse Werewolf Game",
         },
     )
+
+
+def get_stt_model_name() -> str:
+    """音声入力(文字起こし)に使うOpenRouterのモデル名。未設定ならデフォルトを使う。"""
+    name = ""
+    try:
+        name = st.secrets.get("OPENROUTER_STT_MODEL", "")
+    except Exception:
+        name = ""
+    if not name:
+        name = os.getenv("OPENROUTER_STT_MODEL", "")
+    return name or DEFAULT_STT_MODEL_NAME
+
+
+def transcribe_audio(audio_bytes: bytes) -> str:
+    """
+    録音した音声(wavバイト列)を、OpenRouterの音声文字起こしエンドポイント
+    (POST /audio/transcriptions、Whisper系モデル)でテキストに変換する。
+
+    OpenRouterはこのエンドポイントもOpenAI互換のリクエスト形式で受け付けるため、
+    LLM呼び出しと同じ get_client()（同じAPIキー・base_url）をそのまま使い回せる。
+    専用のAPIキーやライブラリの追加は不要。
+
+    失敗した場合は空文字列を返す（呼び出し側で「うまく聞き取れませんでした」
+    という案内を出し、手入力へフォールバックする想定）。
+    """
+    if not audio_bytes:
+        return ""
+    try:
+        client = get_client()
+        result = client.audio.transcriptions.create(
+            model=get_stt_model_name(),
+            file=("voice_input.wav", audio_bytes, "audio/wav"),
+            language="ja",
+        )
+        return (getattr(result, "text", "") or "").strip()
+    except Exception as e:
+        _record_debug_error("音声入力の文字起こし", e)
+        return ""
 
 
 # ======================================================================
@@ -1359,6 +1403,45 @@ def render_day_phase():
     with st.bottom:
         audio_dock = st.empty()
 
+    # --- 音声入力（任意）：マイクで録音した内容をWhisperで文字起こしし、
+    #     下の発言欄に自動で入力する。送信は今まで通りボタンを押した時だけ
+    #     行われるので、認識結果はここで一度確認・修正してから送れる。
+    #
+    # 発言欄(st.text_input)のkeyに対して事前に st.session_state[key]=... を
+    # セットしておくと、その値がその回のウィジェット生成時の初期値になる
+    # （ウィジェット生成"後"に同じ方法で値を変えることはできないので、
+    #   このブロックは必ず下の st.text_input より前に置く必要がある）。
+    text_input_key = f"chat_input_area_{st.session_state.day}"
+    if "voice_input_enabled" not in st.session_state:
+        st.session_state.voice_input_enabled = False
+    if "_last_voice_audio_sig" not in st.session_state:
+        st.session_state._last_voice_audio_sig = None
+
+    if not time_up:
+        with st.bottom:
+            st.session_state.voice_input_enabled = st.toggle(
+                "🎤 音声入力",
+                value=st.session_state.voice_input_enabled,
+                help="マイクで録音すると、自動で下の発言欄に文字起こしされます。",
+            )
+            if st.session_state.voice_input_enabled:
+                audio_value = st.audio_input("発言を録音", label_visibility="collapsed")
+                if audio_value is not None:
+                    raw_bytes = audio_value.getvalue()
+                    # 同じ録音を毎回のrerunで何度も文字起こししないよう、
+                    # 内容が変わった時（＝新しく録音し直した時）だけ処理する。
+                    sig = (len(raw_bytes), hash(raw_bytes[:4096]))
+                    if raw_bytes and sig != st.session_state._last_voice_audio_sig:
+                        st.session_state._last_voice_audio_sig = sig
+                        with st.spinner("文字起こし中..."):
+                            transcribed = transcribe_audio(raw_bytes)
+                        if transcribed:
+                            st.session_state[text_input_key] = transcribed[:150]
+                        else:
+                            st.warning(
+                                "うまく聞き取れませんでした。もう一度録音するか、直接入力してください。"
+                            )
+
     # --- 0) 入力欄は必ず毎回呼び出す（AI生成中でも常に発言できるようにするため） ---
     # st.chat_input は日本語IME変換中のEnterキー（変換確定）でも送信されてしまうことがあるため、
     # ここでは st.form(enter_to_submit=False) + st.text_input を使い、
@@ -1379,7 +1462,7 @@ def render_day_phase():
                 with col_input:
                     draft = st.text_input(
                         "発言を入力",
-                        key=f"chat_input_area_{st.session_state.day}",
+                        key=text_input_key,
                         max_chars=150,
                         label_visibility="collapsed",
                         placeholder="発言を入力（150文字以内）...",
