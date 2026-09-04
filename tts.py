@@ -18,15 +18,45 @@ Streamlitには一切依存しない独立モジュール。app.py側から
   場合に比べて、体感の待ち時間を大きく圧縮できる。
 """
 
+import io
 import re
 import sys
 from concurrent.futures import ThreadPoolExecutor
 
 import requests
 
+try:
+    from mutagen.mp3 import MP3 as _MutagenMP3
+except Exception:  # mutagenが未インストールでも動作は継続する（長さはフォールバック推定になる）
+    _MutagenMP3 = None
+
 FISH_TTS_URL = "https://api.fish.audio/v1/tts"
 DEFAULT_MODEL = "s2.1-pro-free"
 REQUEST_TIMEOUT = 30  # 1文あたりのTTSリクエストのタイムアウト（秒）
+_FALLBACK_BITRATE_BPS = 128 * 1000  # mutagenでヘッダ解析できない場合に使う、控えめなビットレート仮定値(128kbps)
+
+
+def get_mp3_duration_seconds(data, fallback_bitrate_bps=_FALLBACK_BITRATE_BPS):
+    """
+    mp3バイト列の再生時間(秒)を返す。
+    Fish Audioが返すmp3は正しいヘッダを持つため、通常はmutagenで正確な長さが取れる。
+    ヘッダ解析に失敗した場合（壊れたデータ、またはmutagen未インストール）は、
+    ビットレートを128kbpsと仮定した概算値にフォールバックする。
+
+    app.py側で「音声が実際に鳴っている間だけ待ってから次の発言のテキストを
+    表示する」ためのタイミング制御に使う想定。
+    """
+    if not data:
+        return 0.0
+    if _MutagenMP3 is not None:
+        try:
+            info = _MutagenMP3(io.BytesIO(data)).info
+            if info and info.length:
+                return float(info.length)
+        except Exception:
+            pass
+    bits = len(data) * 8
+    return max(0.3, bits / fallback_bitrate_bps)
 
 # 日本語の文区切り「。！？」または改行までを1文として拾う正規表現。
 # 区切り記号自体も文に含める（読み上げの間の取り方が自然になるため）。

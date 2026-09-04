@@ -38,6 +38,7 @@ from tts import (
     synthesize_sentence,
     synthesize_text_batch,
     concat_mp3_clips,
+    get_mp3_duration_seconds,
 )
 from prompts import (
     ROLE_HUMAN,
@@ -87,6 +88,7 @@ AIZUCHI_LINES = [                   # 複数AIが連続で話す際に、間に�
     "そっか。",
 ]
 AIZUCHI_INSERT_CHANCE = 0.6         # 相槌を挟む確率（連続発言が2件以上あるとき）
+AUDIO_SLEEP_BUFFER_SECONDS = 0.2    # 音声の実長に足す余裕（レンダリング遅延などの吸収用）
 
 st.set_page_config(
     page_title="UAI",
@@ -810,6 +812,15 @@ div[data-testid="stFormSubmitButton"] > button {
     font-weight: 700;
     margin: 4px 0 10px;
 }
+
+/* ---- 音声プレイヤー（AIの読み上げ音声）は裏で自動再生するだけにし、
+       操作バーは画面に表示しない ---- */
+div[data-testid="stAudio"] {
+    display: none !important;
+    height: 0 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+}
 </style>
 """
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
@@ -918,8 +929,6 @@ if "screen" not in st.session_state:
 
 if "voice_enabled" not in st.session_state:
     st.session_state.voice_enabled = True  # Fish Audioキーが無ければ実質無効化される
-if "pending_playback_queue" not in st.session_state:
-    st.session_state.pending_playback_queue = None
 if "aizuchi_cache" not in st.session_state:
     st.session_state.aizuchi_cache = {}
 
@@ -1128,36 +1137,36 @@ def get_aizuchi_clip_b64():
     return b64
 
 
-def render_pending_audio_queue():
+def play_clip_and_wait(clip_bytes, extra_delay=AUDIO_SLEEP_BUFFER_SECONDS):
     """
-    直前のターンで生成された音声（相槌＋各AIの発言、順番通り）を再生する。
+    音声クリップを1つ、（CSSで非表示にした）st.audio(..., autoplay=True)で再生し、
+    その音声の実際の長さ分だけ処理を止めて待つ。
 
-    重要: 以前は components.html() の中に生の <audio> + JS を置いて再生していたが、
-    Streamlitのカスタムコンポーネントはサンドボックス化された別iframe内で動くため、
-    親ページ側でユーザーが操作(クリック等)していても、その「自動再生の許可」が
-    iframe側には引き継がれず、ブラウザの自動再生ポリシーによって無音のまま
-    再生がブロックされてしまうケースがあった（＝「音が鳴らない」原因）。
-    そのため、ここではStreamlitネイティブの st.audio(..., autoplay=True) を使う。
-    これはアプリ本体と同じフレームで描画されるため、自動再生が通りやすい。
+    重要（「途中で止まる」バグの根本原因と対策）:
+    以前は「テキストを全部chat_logに入れて音声だけキューに積み、次のrerunで
+    まとめて再生する」という2段階の作りだった。しかしStreamlitの
+    st_autorefresh（待機中の4秒ごとの自動更新）は、まさにその「音声再生中の
+    次のrerun」を待たずに割り込んで発火することがあり、割り込まれた瞬間に
+    画面全体が作り直されて再生中の<audio>要素ごと消えてしまっていた
+    （＝ユーザーから見ると「途中で音声が止まる」）。
 
-    さらに、それでもブラウザ側の制約で自動再生がブロックされた場合に備えて、
-    直前の音声をボタンクリックで（＝確実なユーザー操作として）再生し直せる
-    フォールバックも用意している（render_manual_replay_button）。
+    この関数では、音声を鳴らし始めた"その場"でtime.sleep()により
+    実際の再生時間ぶんだけ処理をブロックする。自動更新(st_autorefresh)が
+    (再)登録されるのはこの関数を含む一連の処理が完全に終わったあと
+    （render_day_phase側のstep 5）だけなので、再生中に自動更新が割り込んで
+    要素を消してしまうことが構造的に起こらなくなる。
 
-    複数文を連続再生するため、mp3クリップを単純連結して1本の音声として渡す。
+    副次効果として、「音声が鳴り始めた瞬間にその発言のテキストが表示される」
+    という体感の同期も、このタイミング制御によって自然に実現される
+    （呼び出し側でテキスト表示の直後にこの関数を呼ぶ設計になっている）。
+
+    バックグラウンドから呼ばれるわけではなくメインスクリプトの流れの中で
+    呼ばれるため、st.audio自体は問題なく使える。
     """
-    queue = st.session_state.get("pending_playback_queue")
-    st.session_state.pending_playback_queue = None  # 二重再生防止：描画したら即クリア
-    if not queue:
+    if not clip_bytes:
         return
-    clips = [c["b64"] for c in queue if c and c.get("b64")]
-    if not clips:
-        return
-    combined = concat_mp3_clips([base64.b64decode(b64) for b64 in clips])
-    if not combined:
-        return
-    st.session_state.last_audio_bytes = combined  # 手動リプレイ用に保持
-    st.audio(combined, format="audio/mp3", autoplay=True)
+    st.audio(clip_bytes, format="audio/mp3", autoplay=True)
+    time.sleep(get_mp3_duration_seconds(clip_bytes) + extra_delay)
 
 
 def render_manual_replay_button():
@@ -1278,9 +1287,6 @@ def render_day_phase():
         if entry.get("day") == st.session_state.day:
             render_statement_card(entry["seat"], entry["text"])
 
-    # 直前のターンで生成された音声（あれば）を、テキストが表示された直後に再生する。
-    render_pending_audio_queue()
-
     # --- 0) 入力欄は必ず毎回呼び出す（AI生成中でも常に発言できるようにするため） ---
     # st.chat_input は日本語IME変換中のEnterキー（変換確定）でも送信されてしまうことがあるため、
     # ここでは st.form(enter_to_submit=False) + st.text_input を使い、
@@ -1340,31 +1346,41 @@ def render_day_phase():
                 tts_executor=tts_executor,
             )
 
-        # テキストは即座にchat_logへ（表示テンポは従来通り維持）。
-        # 音声は「相槌 → 発言者A → (相槌) → 発言者B ...」の順で
-        # 1本の再生キューにまとめ、次のrerun直後にまとめて連続再生する。
-        playback_queue = []
+        # 発言者1人ずつ「テキストを確定・表示 → その音声を再生 → 実際の長さぶん待つ」
+        # の順で処理する。これにより、次の人の発言（と音声）に進むのは必ず
+        # 前の人の音声が鳴り終わったあとになり、「音声が出た瞬間にその発言の
+        # 文字が表示される」体感になる。
+        # （このループはrerunを挟まず、この1回のスクリプト実行の中で完結する。
+        #   自動更新(st_autorefresh)が再生の途中に割り込むことはない。詳細は
+        #   play_clip_and_wait() のコメントを参照。）
+        replay_clips = []
+        any_played = False
         for seat, text, audio_clips in results:
-            st.session_state.chat_log.append({"day": st.session_state.day, "seat": seat, "text": text})
             valid_clips = [c for c in audio_clips if c]
             if fish_key and not valid_clips:
                 # 音声ONでテキストは生成できたのに音声が1つも得られなかった場合は、
                 # 「無言で失敗」にせず、既存の通信状態パネルで確認できるようにする。
                 _record_debug_error(seat, "音声合成に失敗しました（APIキー・残高・ネットワークをご確認ください）")
-            if not valid_clips:
-                continue
-            if playback_queue and random.random() < AIZUCHI_INSERT_CHANCE:
+
+            if valid_clips and any_played and random.random() < AIZUCHI_INSERT_CHANCE:
                 aizuchi_b64 = get_aizuchi_clip_b64()
                 if aizuchi_b64:
-                    playback_queue.append({"type": "aizuchi", "b64": aizuchi_b64})
+                    aizuchi_bytes = base64.b64decode(aizuchi_b64)
+                    play_clip_and_wait(aizuchi_bytes)
+                    replay_clips.append(aizuchi_bytes)
+
+            # 発言のテキストは、その音声が再生され始める「今」確定・表示する
+            # （音声が無い/失敗した場合も、ここで即座にテキストだけ表示する）。
+            st.session_state.chat_log.append({"day": st.session_state.day, "seat": seat, "text": text})
+            render_statement_card(seat, text)
+
             for clip in valid_clips:
-                playback_queue.append({
-                    "type": "speech",
-                    "seat": seat,
-                    "b64": base64.b64encode(clip).decode("ascii"),
-                })
-        if playback_queue:
-            st.session_state.pending_playback_queue = playback_queue
+                play_clip_and_wait(clip)
+                replay_clips.append(clip)
+                any_played = True
+
+        if replay_clips:
+            st.session_state.last_audio_bytes = concat_mp3_clips(replay_clips)  # 手動リプレイ用に保持
 
         st.session_state.pending_speakers = []
         st.session_state.next_ai_speak_time = time.time() + random.uniform(
