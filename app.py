@@ -19,10 +19,12 @@ UAI - Streamlit Webアプリ（自由チャット版・社会的推理ゲーム�
   - 最多票が同数(2名以上)   → 誰も追放されず、そのまま次の日の昼フェーズへ
 """
 
+import base64
 import os
 import random
 import re
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import streamlit as st
@@ -31,6 +33,11 @@ from dotenv import load_dotenv
 from openai import OpenAI
 from streamlit_autorefresh import st_autorefresh
 
+from tts import (
+    SentenceTTSPipeline,
+    synthesize_sentence,
+    synthesize_text_batch,
+)
 from prompts import (
     ROLE_HUMAN,
     ROLE_EMULATOR,
@@ -68,6 +75,18 @@ LLM_TIMEOUT_SECONDS = 15         # OpenRouterへの通信タイムアウト（�
                                   # これが無いと、応答が返ってこない場合に「考え中」のまま
                                   # 永遠に待ち続けてしまう。
 
+# ---- 音声読み上げ(TTS / Fish Audio) 関連設定 ----
+FISH_MODEL_NAME = "s2.1-pro-free"   # Fish Audioのモデル（無料枠。品質保証は無いが検証用途には十分）
+TTS_MAX_WORKERS = 4                 # TTSリクエスト用スレッドプールの同時実行数
+AIZUCHI_LINES = [                   # 複数AIが連続で話す際に、間に挟む短い相槌
+    "うんうん。",
+    "なるほどね。",
+    "へえ、そうなんだ。",
+    "ふむ……。",
+    "そっか。",
+]
+AIZUCHI_INSERT_CHANCE = 0.6         # 相槌を挟む確率（連続発言が2件以上あるとき）
+
 st.set_page_config(
     page_title="UAI",
     page_icon="◈",
@@ -103,6 +122,42 @@ def get_client():
     )
 
 
+# ======================================================================
+# 音声読み上げ(TTS / Fish Audio) 用のAPIキー・実行環境
+# ======================================================================
+def get_fish_api_key() -> str:
+    key = ""
+    try:
+        key = st.secrets.get("FISH_AUDIO_API_KEY", "")
+    except Exception:
+        key = ""
+    if not key:
+        key = os.getenv("FISH_AUDIO_API_KEY", "")
+    return key
+
+
+def get_fish_reference_id() -> str:
+    """任意の声(reference_id)。未設定ならFish Audio側のデフォルト音声が使われる。"""
+    ref = ""
+    try:
+        ref = st.secrets.get("FISH_AUDIO_REFERENCE_ID", "")
+    except Exception:
+        ref = ""
+    if not ref:
+        ref = os.getenv("FISH_AUDIO_REFERENCE_ID", "")
+    return ref
+
+
+@st.cache_resource(show_spinner=False)
+def get_tts_executor():
+    """
+    TTSリクエスト専用のスレッドプール。LLM呼び出し用のThreadPoolExecutorとは
+    完全に分離し、アプリのプロセス寿命を通じて使い回す（セッションごとに
+    毎回作り直さない）。文単位で非同期にFish Audioへ投げるための土台。
+    """
+    return ThreadPoolExecutor(max_workers=TTS_MAX_WORKERS)
+
+
 _JAPANESE_CHAR_RE = re.compile(r"[぀-ヿ一-鿿]")  # ひらがな・カタカナ・漢字の文字コード範囲
 
 # 何度リトライしても失敗した場合の、キャラクター性を壊さない自然なフォールバック発言
@@ -134,6 +189,40 @@ def call_llm(messages, max_tokens=300, temperature=0.9):
         # LLM_TIMEOUT_SECONDS を超えると、ここで例外として捕捉され、
         # 「考え中」のまま止まることなく処理が先に進む。
         _record_debug_error("LLM呼び出し", e)
+        return f"[通信エラー: {e}]"
+
+
+def call_llm_stream(messages, max_tokens=300, temperature=0.9, on_delta=None):
+    """
+    call_llm のストリーミング版。OpenRouterからテキストが断片(delta)で
+    届くたびに on_delta(delta) を呼び出す。これにより呼び出し側
+    （SentenceTTSPipeline）は、文が確定した瞬間に即座にTTSへ回せる。
+    通信エラー時は例外を送出せず、call_llm と同じ形式の
+    "[通信エラー: ...]" という文字列を返す。
+    """
+    client = get_client()
+    text_parts = []
+    try:
+        stream = client.chat.completions.create(
+            model=MODEL_NAME,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            messages=messages,
+            stream=True,
+        )
+        for event in stream:
+            delta = ""
+            try:
+                delta = event.choices[0].delta.content or ""
+            except Exception:
+                delta = ""
+            if delta:
+                text_parts.append(delta)
+                if on_delta:
+                    on_delta(delta)
+        return "".join(text_parts).strip()
+    except Exception as e:
+        _record_debug_error("LLM呼び出し(streaming)", e)
         return f"[通信エラー: {e}]"
 
 
@@ -172,6 +261,71 @@ def call_ai_chat_reply(role, seat_name, day, chat_log, alive_seats, personality=
     if len(text) > 150:
         text = text[:148] + "…"
     return text
+
+
+def call_ai_chat_reply_with_audio(
+    role, seat_name, day, chat_log, alive_seats, personality=None, known_facts=None,
+    tts_api_key=None, tts_reference_id=None, tts_executor=None,
+):
+    """
+    call_ai_chat_reply と同じ検証・リトライ・フォールバックのロジックを
+    保ちながら、テキストがLLMからストリーミングで届くのと"並行して"、
+    文が1つ確定するたびに即座にFish Audio(TTS)へリクエストを投げる
+    「パイプライン生成」を行う。
+
+    tts_api_key が無い（音声OFF / キー未設定）場合は、通常の非ストリーミング
+    call_llm にフォールバックし、テキスト表示のテンポには一切影響しない。
+
+    戻り値: (text, audio_clips)
+      audio_clips は文の順番通りの音声バイト列(bytes|None)のリスト。
+      TTSが無効、または全文に渡って合成が失敗した場合は空リスト。
+    """
+    messages = build_chat_reply_messages(
+        role, seat_name, day, chat_log, alive_seats, personality=personality, known_facts=known_facts
+    )
+    text = ""
+    audio_clips = []
+    voice_on = bool(tts_api_key and tts_executor)
+
+    for attempt in range(3):
+        pipeline = None
+        if voice_on:
+            pipeline = SentenceTTSPipeline(
+                tts_api_key, tts_executor, model=FISH_MODEL_NAME, reference_id=tts_reference_id
+            )
+            raw = call_llm_stream(messages, max_tokens=220, temperature=0.95, on_delta=pipeline.feed)
+        else:
+            raw = call_llm(messages, max_tokens=220, temperature=0.95)
+        candidate = raw.strip()
+
+        is_comm_error = candidate.startswith("[通信エラー")
+        if candidate and not is_comm_error and looks_japanese(candidate):
+            text = candidate
+            if pipeline is not None:
+                pipeline.finish()  # ストリーム終了後に残った断片を最後の1文として処理
+                audio_clips = pipeline.collect_audio()
+            break
+
+        if pipeline is not None:
+            # この試行は不採用になるので、TTS結果も丸ごと破棄する
+            pipeline.cancel()
+
+        messages = messages + [{
+            "role": "user",
+            "content": "重要: 必ず日本語のみで、150文字以内の1文を出力してください。英語や他の言語、空の返答は禁止です。",
+        }]
+
+    if not text:
+        text = random.choice(_FALLBACK_LINES)
+        if voice_on:
+            # フォールバック発言（定型文）は、まとめてバッチ合成する
+            audio_clips = synthesize_text_batch(
+                text, tts_api_key, tts_reference_id, tts_executor, model=FISH_MODEL_NAME
+            )
+
+    if len(text) > 150:
+        text = text[:148] + "…"
+    return text, audio_clips
 
 
 def call_ai_vote(role, seat_name, day, chat_log, candidates, known_facts=None, personality=None):
@@ -245,13 +399,17 @@ def decide_speakers(candidates, exclude_last=None):
 def generate_replies_concurrently(
     speakers, day, chat_log, alive_seats, seat_roles,
     seat_personalities=None, seer_seat=None, seer_known_facts=None,
+    tts_api_key=None, tts_reference_id=None, tts_executor=None,
 ):
     """
     複数のAIの発言を、実際に並行して(同時に)通信・生成する。
-    完了した順に (seat, text) のタプルとして返す。
+    完了した順に (seat, text, audio_clips) のタプルとして返す。
+    audio_clips は文の順番通りの音声バイト列(bytes|None)のリスト（TTS無効/失敗時は []）。
     seat_personalities: {座席名: 個性辞書} の対応表。各AIの発言トーンに反映する。
     seer_seat / seer_known_facts: 占い師AIが話者に含まれる場合、自身の調査結果を
         会話の判断材料として渡すために使う（占い師AI以外には渡さない）。
+    tts_api_key が渡された場合、各AIのテキスト生成(ストリーミング)と並行して、
+    文単位でFish AudioへのTTSリクエストも裏側で走る（call_ai_chat_reply_with_audio参照）。
 
     重要: ThreadPoolExecutorを `with` 文で使うと、ブロック終了時に
     「まだ終わっていないスレッドの完了を待つ」処理(shutdown(wait=True))が
@@ -269,9 +427,10 @@ def generate_replies_concurrently(
     try:
         future_to_seat = {
             executor.submit(
-                call_ai_chat_reply, seat_roles[seat], seat, day, chat_log, alive_seats,
+                call_ai_chat_reply_with_audio, seat_roles[seat], seat, day, chat_log, alive_seats,
                 personality=seat_personalities.get(seat),
                 known_facts=(seer_known_facts if seat == seer_seat else None),
+                tts_api_key=tts_api_key, tts_reference_id=tts_reference_id, tts_executor=tts_executor,
             ): seat
             for seat in speakers
         }
@@ -279,20 +438,20 @@ def generate_replies_concurrently(
             for future in as_completed(future_to_seat, timeout=hard_timeout + 5):
                 seat = future_to_seat[future]
                 try:
-                    text = future.result(timeout=hard_timeout)
+                    text, audio_clips = future.result(timeout=hard_timeout)
                 except Exception as e:
-                    text = random.choice(_FALLBACK_LINES)
+                    text, audio_clips = random.choice(_FALLBACK_LINES), []
                     _record_debug_error(seat, e)
-                results.append((seat, text))
+                results.append((seat, text, audio_clips))
         except Exception as e:
             # as_completed自体が全体タイムアウトした場合もここで捕捉し、必ず先に進める
             _record_debug_error("全体", e)
 
         # 何らかの理由で結果が得られなかった座席は、必ずフォールバックで埋める
-        done_seats = {seat for seat, _ in results}
+        done_seats = {seat for seat, _, _ in results}
         for future, seat in future_to_seat.items():
             if seat not in done_seats:
-                results.append((seat, random.choice(_FALLBACK_LINES)))
+                results.append((seat, random.choice(_FALLBACK_LINES), []))
                 _record_debug_error(seat, "全体タイムアウトにより打ち切り")
     finally:
         # wait=False: 未完了のスレッドを待たずに、ここで即座に関数を抜ける
@@ -756,6 +915,30 @@ def seer_known_facts_text():
 if "screen" not in st.session_state:
     st.session_state.screen = "title"  # "title" | "game"
 
+if "voice_enabled" not in st.session_state:
+    st.session_state.voice_enabled = True  # Fish Audioキーが無ければ実質無効化される
+if "pending_playback_queue" not in st.session_state:
+    st.session_state.pending_playback_queue = None
+if "aizuchi_cache" not in st.session_state:
+    st.session_state.aizuchi_cache = {}
+
+
+def render_voice_sidebar():
+    """サイドバーに音声読み上げのON/OFFトグルを表示する。"""
+    with st.sidebar:
+        st.markdown("### 🔊 音声設定")
+        fish_key_present = bool(get_fish_api_key())
+        if not fish_key_present:
+            st.caption(
+                "`FISH_AUDIO_API_KEY` が未設定のため、音声読み上げは利用できません"
+                "（テキストのみで進行します）。"
+            )
+        st.session_state.voice_enabled = st.checkbox(
+            "AIの発言を読み上げる（Fish Audio）",
+            value=st.session_state.get("voice_enabled", True),
+            disabled=not fish_key_present,
+        )
+
 
 # ======================================================================
 # タイトル画面
@@ -917,6 +1100,72 @@ def render_statement_card(seat, text):
     )
 
 
+def get_aizuchi_clip_b64():
+    """
+    複数のAIが連続して話すときに間へ挟む、短い相槌の音声(base64)を1つ返す。
+    相槌は種類が少なく使い回すので、一度合成した音声はセッション内でキャッシュし、
+    毎回Fish Audioへ問い合わせずに済むようにする（レイテンシ・コスト削減）。
+    生成に失敗した場合はNoneを返す（呼び出し側は相槌無しとして扱う）。
+    """
+    cache = st.session_state.setdefault("aizuchi_cache", {})
+    line = random.choice(AIZUCHI_LINES)
+    if line in cache:
+        return cache[line]
+    api_key = get_fish_api_key()
+    if not api_key:
+        return None
+    audio = synthesize_sentence(line, api_key, FISH_MODEL_NAME, get_fish_reference_id())
+    if not audio:
+        return None
+    b64 = base64.b64encode(audio).decode("ascii")
+    cache[line] = b64
+    return b64
+
+
+def render_pending_audio_queue():
+    """
+    直前のターンで生成された音声（相槌＋各AIの発言、順番通り）を
+    ブラウザ側で連続再生する。1つの<audio>要素を使い回し、
+    'ended'イベントで次のクリップへ繋げることで、
+    「切れ目のない連続再生」を実現している。
+
+    描画した瞬間にキューをクリアするため、以降の自動更新(st_autorefresh)や
+    再実行(rerun)で同じ音声が再度流れることはない。
+    """
+    queue = st.session_state.get("pending_playback_queue")
+    st.session_state.pending_playback_queue = None  # 二重再生防止：描画したら即クリア
+    if not queue:
+        return
+    clips_b64 = [c["b64"] for c in queue if c and c.get("b64")]
+    if not clips_b64:
+        return
+    sources_js = ",".join(f'"data:audio/mpeg;base64,{b64}"' for b64 in clips_b64)
+    html = f"""
+    <audio id="uai_tts_player" style="display:none;"></audio>
+    <script>
+      (function() {{
+        const sources = [{sources_js}];
+        let idx = 0;
+        const player = document.getElementById('uai_tts_player');
+        function playNext() {{
+          if (idx >= sources.length) return;
+          player.src = sources[idx];
+          idx += 1;
+          const p = player.play();
+          if (p && p.catch) {{
+            // ブラウザの自動再生ポリシーでブロックされた場合は静かに諦める
+            // （ユーザーの最初の操作以降は通常再生できるようになる）
+            p.catch(function() {{}});
+          }}
+        }}
+        player.addEventListener('ended', playNext);
+        playNext();
+      }})();
+    </script>
+    """
+    components.html(html, height=0)
+
+
 def render_client_side_timer(deadline_epoch, total_seconds):
     """
     サーバーへの再実行(rerun)を発生させない、ブラウザ内だけで動くカウントダウン表示。
@@ -1024,6 +1273,9 @@ def render_day_phase():
         if entry.get("day") == st.session_state.day:
             render_statement_card(entry["seat"], entry["text"])
 
+    # 直前のターンで生成された音声（あれば）を、テキストが表示された直後に再生する。
+    render_pending_audio_queue()
+
     # --- 0) 入力欄は必ず毎回呼び出す（AI生成中でも常に発言できるようにするため） ---
     # st.chat_input は日本語IME変換中のEnterキー（変換確定）でも送信されてしまうことがあるため、
     # ここでは st.form(enter_to_submit=False) + st.text_input を使い、
@@ -1069,15 +1321,42 @@ def render_day_phase():
         speakers = st.session_state.pending_speakers
         label = "、".join(speakers)
         seer_seat = st.session_state.get("seer_seat")
+        voice_on = st.session_state.get("voice_enabled", True)
+        fish_key = get_fish_api_key() if voice_on else ""
+        tts_executor = get_tts_executor() if fish_key else None
         with st.spinner(f"{label} が発言を考え中..."):
             results = generate_replies_concurrently(
                 speakers, st.session_state.day, st.session_state.chat_log, alive, st.session_state.seat_roles,
                 seat_personalities=st.session_state.get("seat_personalities"),
                 seer_seat=seer_seat,
                 seer_known_facts=seer_known_facts_text() if seer_seat else None,
+                tts_api_key=fish_key or None,
+                tts_reference_id=get_fish_reference_id(),
+                tts_executor=tts_executor,
             )
-        for seat, text in results:
+
+        # テキストは即座にchat_logへ（表示テンポは従来通り維持）。
+        # 音声は「相槌 → 発言者A → (相槌) → 発言者B ...」の順で
+        # 1本の再生キューにまとめ、次のrerun直後にまとめて連続再生する。
+        playback_queue = []
+        for seat, text, audio_clips in results:
             st.session_state.chat_log.append({"day": st.session_state.day, "seat": seat, "text": text})
+            valid_clips = [c for c in audio_clips if c]
+            if not valid_clips:
+                continue
+            if playback_queue and random.random() < AIZUCHI_INSERT_CHANCE:
+                aizuchi_b64 = get_aizuchi_clip_b64()
+                if aizuchi_b64:
+                    playback_queue.append({"type": "aizuchi", "b64": aizuchi_b64})
+            for clip in valid_clips:
+                playback_queue.append({
+                    "type": "speech",
+                    "seat": seat,
+                    "b64": base64.b64encode(clip).decode("ascii"),
+                })
+        if playback_queue:
+            st.session_state.pending_playback_queue = playback_queue
+
         st.session_state.pending_speakers = []
         st.session_state.next_ai_speak_time = time.time() + random.uniform(
             AI_SPEAK_MIN_INTERVAL, AI_SPEAK_MAX_INTERVAL
@@ -1352,6 +1631,7 @@ def main():
         render_title_screen()
         return
 
+    render_voice_sidebar()
     render_header()
 
     if not get_api_key():
