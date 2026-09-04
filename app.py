@@ -20,11 +20,13 @@ UAI - Streamlit Webアプリ（自由チャット版・社会的推理ゲーム�
 """
 
 import base64
+import io
 import os
 import random
 import re
 import time
 import uuid
+import wave
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import streamlit as st
@@ -1136,6 +1138,10 @@ def render_title_screen():
     st.write("")
     st.write("")
     if st.button("▶ ゲームを開始する", type="primary", use_container_width=True):
+        # このクリックに直結させて無音を1回再生しておくことで、後でタイマー経由
+        # （＝クリックを伴わずに）自動再生される最初のAIの発言がブラウザの
+        # 自動再生制限でブロックされる事態を防ぐ（_silent_wav_bytesのコメント参照）。
+        st.audio(_silent_wav_bytes(), format="audio/wav", autoplay=True)
         initialize_game()
         st.session_state.screen = "game"
         st.rerun()
@@ -1232,6 +1238,29 @@ def get_aizuchi_clip_b64():
     b64 = base64.b64encode(audio).decode("ascii")
     cache[line] = b64
     return b64
+
+
+def _silent_wav_bytes(duration_sec=0.15, sample_rate=8000):
+    """
+    無音の極小WAVファイルをその場で生成する（ネットワーク不要・依存ライブラリ不要）。
+
+    用途: 「ゲームを開始する」ボタンのクリック直後に、この無音音声を
+    st.audio(..., autoplay=True) で1回再生しておく。ブラウザの自動再生制限
+    （音声付きのメディアは、そのページ/オリジンでユーザー操作が一度も無いと
+    自動再生できない）は、多くの場合いったん何か1つでも音声の自動再生に
+    成功すると、それ以降のセッションでは自動再生が許可されるようになる。
+    ここでボタンクリックという明確なユーザー操作に直結させて音声再生を
+    "起動"しておくことで、その後タイマー経由で（＝ユーザー操作を伴わずに）
+    再生される最初のAIの発言が自動再生をブロックされてしまう問題を防ぐ。
+    """
+    buf = io.BytesIO()
+    n_frames = int(duration_sec * sample_rate)
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes(b"\x00\x00" * n_frames)
+    return buf.getvalue()
 
 
 def play_clip_and_wait(clip_bytes, dock=None, extra_delay=AUDIO_SLEEP_BUFFER_SECONDS):
@@ -1417,15 +1446,28 @@ def render_day_phase():
     if "_last_voice_audio_sig" not in st.session_state:
         st.session_state._last_voice_audio_sig = None
 
+    user_msg = None
     if not time_up:
         with st.bottom:
-            st.session_state.voice_input_enabled = st.toggle(
-                "🎤 音声入力",
-                value=st.session_state.voice_input_enabled,
-                help="マイクで録音すると、自動で下の発言欄に文字起こしされます。",
-            )
+            # 録音パネル用の枠。マイクボタンより先に確保しておくことで、
+            # 開いた時に「マイクボタン＋発言欄」の行のすぐ上に表示される。
+            recorder_slot = st.empty()
+
+            # マイクボタンは発言欄と同じ行の左側に置きたいが、
+            # st.form の中では通常のst.button()が使えない（st.form_submit_button
+            # だと、押した瞬間にclear_on_submitで入力中の下書きまで消えてしまう）
+            # ため、フォームの外に置いた列(col_mic)とフォーム自体(col_form)を
+            # 横に並べる形にしている。
+            col_mic, col_form = st.columns([1, 7], vertical_alignment="bottom")
+            with col_mic:
+                if st.button(
+                    "🎤", key="mic_toggle_btn", use_container_width=True,
+                    help="タップして録音パネルを開く/閉じる（マイクの許可を求められたら許可してください）",
+                ):
+                    st.session_state.voice_input_enabled = not st.session_state.voice_input_enabled
+
             if st.session_state.voice_input_enabled:
-                audio_value = st.audio_input("発言を録音", label_visibility="collapsed")
+                audio_value = recorder_slot.audio_input("発言を録音", label_visibility="collapsed")
                 if audio_value is not None:
                     raw_bytes = audio_value.getvalue()
                     # 同じ録音を毎回のrerunで何度も文字起こししないよう、
@@ -1437,38 +1479,30 @@ def render_day_phase():
                             transcribed = transcribe_audio(raw_bytes)
                         if transcribed:
                             st.session_state[text_input_key] = transcribed[:150]
+                            st.session_state.voice_input_enabled = False  # 成功したらパネルは閉じる
                         else:
                             st.warning(
                                 "うまく聞き取れませんでした。もう一度録音するか、直接入力してください。"
                             )
 
-    # --- 0) 入力欄は必ず毎回呼び出す（AI生成中でも常に発言できるようにするため） ---
-    # st.chat_input は日本語IME変換中のEnterキー（変換確定）でも送信されてしまうことがあるため、
-    # ここでは st.form(enter_to_submit=False) + st.text_input を使い、
-    # 見た目はほぼ同じ横並びの入力欄のまま、Enterキーでは絶対に送信されないようにしている
-    # （送信は必ず送信ボタンを押した時のみ発生する）。
-    # さらに st.bottom コンテナに入れることで、st.chat_input と同じように
-    # 画面（アプリ本体）の一番下に常に固定表示されるようにしている。
-    user_msg = None
-    if not time_up:
-        with st.bottom:
-            with st.form(
-                key="chat_form",
-                clear_on_submit=True,
-                enter_to_submit=False,
-                border=False,
-            ):
-                col_input, col_btn = st.columns([6, 1], vertical_alignment="bottom")
-                with col_input:
-                    draft = st.text_input(
-                        "発言を入力",
-                        key=text_input_key,
-                        max_chars=150,
-                        label_visibility="collapsed",
-                        placeholder="発言を入力（150文字以内）...",
-                    )
-                with col_btn:
-                    submitted = st.form_submit_button("送信 ➤", type="primary", use_container_width=True)
+            with col_form:
+                with st.form(
+                    key="chat_form",
+                    clear_on_submit=True,
+                    enter_to_submit=False,
+                    border=False,
+                ):
+                    col_input, col_btn = st.columns([6, 1], vertical_alignment="bottom")
+                    with col_input:
+                        draft = st.text_input(
+                            "発言を入力",
+                            key=text_input_key,
+                            max_chars=150,
+                            label_visibility="collapsed",
+                            placeholder="発言を入力（150文字以内）...",
+                        )
+                    with col_btn:
+                        submitted = st.form_submit_button("送信 ➤", type="primary", use_container_width=True)
         if submitted and draft and draft.strip():
             user_msg = draft
 
