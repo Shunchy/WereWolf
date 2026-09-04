@@ -39,9 +39,11 @@ from prompts import (
     ROLE_LABEL_JP,
     SKIP_VOTE,
     SKIP_LABEL_JP,
+    PERSONALITY_POOL,
     build_chat_reply_messages,
     build_vote_messages,
     build_seer_investigation_messages,
+    build_vote_reveal_text,
     try_parse_vote,
     try_parse_seer_target,
 )
@@ -135,14 +137,18 @@ def call_llm(messages, max_tokens=300, temperature=0.9):
         return f"[通信エラー: {e}]"
 
 
-def call_ai_chat_reply(role, seat_name, day, chat_log, alive_seats):
+def call_ai_chat_reply(role, seat_name, day, chat_log, alive_seats, personality=None, known_facts=None):
     """
     AIの発言を生成する。応答が空、または日本語になっていない場合は
     最大2回まで「必ず日本語で」と念押しして再試行し、それでも駄目な場合は
     「(応答なし)」のような不自然な文言ではなく、キャラクター性を保った
     フォールバック発言を返す。
+    personality: このAIに割り当てられた個性辞書。発言のトーンに反映される。
+    known_facts: 占い師AI自身が既に掴んでいる調査結果（占い師AI以外は通常None）。
     """
-    messages = build_chat_reply_messages(role, seat_name, day, chat_log, alive_seats)
+    messages = build_chat_reply_messages(
+        role, seat_name, day, chat_log, alive_seats, personality=personality, known_facts=known_facts
+    )
     text = ""
 
     for attempt in range(3):
@@ -168,13 +174,16 @@ def call_ai_chat_reply(role, seat_name, day, chat_log, alive_seats):
     return text
 
 
-def call_ai_vote(role, seat_name, day, chat_log, candidates, known_facts=None):
+def call_ai_vote(role, seat_name, day, chat_log, candidates, known_facts=None, personality=None):
     """
     candidates: 投票先として選べる座席名のリスト（自分を除く生存者。SKIP_VOTEは含めない）
     known_facts: 占い師AIなど、確定情報を持つ役職のために渡す追加事実（文字列のリスト）。
+    personality: このAIに割り当てられた個性辞書。
     戻り値は座席名、または SKIP_VOTE（スキップ）。
     """
-    messages = build_vote_messages(role, seat_name, day, chat_log, candidates, known_facts=known_facts)
+    messages = build_vote_messages(
+        role, seat_name, day, chat_log, candidates, known_facts=known_facts, personality=personality
+    )
     raw = call_llm(messages, max_tokens=80, temperature=0.7)
     valid_choices = candidates + [SKIP_VOTE]
     vote = try_parse_vote(raw, valid_choices)
@@ -183,14 +192,17 @@ def call_ai_vote(role, seat_name, day, chat_log, candidates, known_facts=None):
     return vote
 
 
-def call_seer_choose_target(seat_name, day, chat_log, candidates, known_facts=None):
+def call_seer_choose_target(seat_name, day, chat_log, candidates, known_facts=None, personality=None):
     """
     占い師AI自身に、今夜調査する相手を1名選ばせる。
     candidates: 調査対象として選べる座席名のリスト（占い師自身を除く生存者）。
     known_facts: これまでの調査で判明済みの事実（文字列のリスト）。
+    personality: このAIに割り当てられた個性辞書。
     戻り値は座席名。パース失敗時は候補からランダムに選ぶ（フォールバック）。
     """
-    messages = build_seer_investigation_messages(seat_name, day, chat_log, candidates, known_facts=known_facts)
+    messages = build_seer_investigation_messages(
+        seat_name, day, chat_log, candidates, known_facts=known_facts, personality=personality
+    )
     raw = call_llm(messages, max_tokens=80, temperature=0.7)
     target = try_parse_seer_target(raw, candidates)
     if target is None:
@@ -230,10 +242,16 @@ def decide_speakers(candidates, exclude_last=None):
     return random.sample(pool, n)
 
 
-def generate_replies_concurrently(speakers, day, chat_log, alive_seats, seat_roles):
+def generate_replies_concurrently(
+    speakers, day, chat_log, alive_seats, seat_roles,
+    seat_personalities=None, seer_seat=None, seer_known_facts=None,
+):
     """
     複数のAIの発言を、実際に並行して(同時に)通信・生成する。
     完了した順に (seat, text) のタプルとして返す。
+    seat_personalities: {座席名: 個性辞書} の対応表。各AIの発言トーンに反映する。
+    seer_seat / seer_known_facts: 占い師AIが話者に含まれる場合、自身の調査結果を
+        会話の判断材料として渡すために使う（占い師AI以外には渡さない）。
 
     重要: ThreadPoolExecutorを `with` 文で使うと、ブロック終了時に
     「まだ終わっていないスレッドの完了を待つ」処理(shutdown(wait=True))が
@@ -244,13 +262,16 @@ def generate_replies_concurrently(speakers, day, chat_log, alive_seats, seat_rol
     取り残されたスレッドは、バックグラウンドで終わるか、やがて例外になるかする
     だけで、以後の画面表示をブロックすることはない。
     """
+    seat_personalities = seat_personalities or {}
     results = []
     hard_timeout = LLM_TIMEOUT_SECONDS * 3 + 10  # リトライ3回分+余裕を持った絶対上限
     executor = ThreadPoolExecutor(max_workers=max(1, len(speakers)))
     try:
         future_to_seat = {
             executor.submit(
-                call_ai_chat_reply, seat_roles[seat], seat, day, chat_log, alive_seats
+                call_ai_chat_reply, seat_roles[seat], seat, day, chat_log, alive_seats,
+                personality=seat_personalities.get(seat),
+                known_facts=(seer_known_facts if seat == seer_seat else None),
             ): seat
             for seat in speakers
         }
@@ -638,9 +659,12 @@ st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 # ゲーム状態の初期化
 # ======================================================================
 def reset_day_state():
-    """新しい昼フェーズ（自由チャット）用の状態にリセットする。"""
+    """
+    新しい昼フェーズ（自由チャット）用の状態にリセットする。
+    chat_log はここではクリアしない（ゲーム全体を通した会話履歴を保持し、
+    AIが日をまたいでも記憶を保ったまま会話・投票できるようにするため）。
+    """
     st.session_state.phase = "day"
-    st.session_state.chat_log = []
     st.session_state.day_phase_start = time.time()
     st.session_state.next_ai_speak_time = time.time() + random.uniform(3, 7)
     st.session_state.force_end_day = False
@@ -664,11 +688,22 @@ def initialize_game():
     st.session_state.seat_roles = seat_roles
     st.session_state.human_seat = human_seat
     st.session_state.seer_seat = seer_seat
+
+    # 各AI座席にランダムな「個性」を1つずつ割り当てる（役職とは無関係）。
+    # プレイヤーには一切表示されないが、発言のトーン・話し方に反映される。
+    personalities = random.sample(PERSONALITY_POOL, len(seats))
+    st.session_state.seat_personalities = dict(zip(seats, personalities))
+
     # 占い師AIがこれまでに調査して判明した正体（座席名 → 役職）。
     # ゲーム全体を通して蓄積され、人間プレイヤーには一切表示されない。
     st.session_state.seer_investigations = {}
     st.session_state.alive = seats.copy()
     st.session_state.day = 1
+
+    # ゲーム全体を通した会話履歴（日をまたいで保持される）。
+    # 各エントリ: {"day": int, "seat": str, "text": str}
+    # seat == "SYSTEM" のエントリは投票結果公開など、ゲーム進行上の公開情報。
+    st.session_state.chat_log = []
 
     st.session_state.game_over = False
     st.session_state.game_result = None
@@ -703,6 +738,7 @@ def run_seer_investigation():
     target = call_seer_choose_target(
         seer_seat, st.session_state.day, st.session_state.chat_log, candidates,
         known_facts=known_facts,
+        personality=st.session_state.get("seat_personalities", {}).get(seer_seat),
     )
     known[target] = st.session_state.seat_roles[target]
 
@@ -851,6 +887,19 @@ def render_header():
 
 
 def render_statement_card(seat, text):
+    if seat == "SYSTEM":
+        st.markdown(
+            f"""<div style="text-align:center; margin:16px 0;">
+                    <div style="display:inline-block; max-width:90%; border:1px dashed #3a4149;
+                                color:#9aa4ad; background-color:#0f1216; padding:10px 18px;
+                                border-radius:14px; font-size:12px; letter-spacing:1px;
+                                line-height:1.8; white-space:pre-line; text-align:left;">
+                        {text}
+                    </div>
+                </div>""",
+            unsafe_allow_html=True,
+        )
+        return
     is_self = seat == st.session_state.human_seat
     row_cls = "seat-row self" if is_self else "seat-row ai"
     card_cls = "seat-card self" if is_self else "seat-card ai"
@@ -970,8 +1019,10 @@ def render_day_phase():
     render_client_side_timer(deadline, DAY_PHASE_SECONDS)
     st.caption("議題は決まっていません。自由に会話して、誰が「本物の人間」か探ってください。")
 
+    # 表示は「本日分」の発言のみに絞る（AIへ渡す文脈は日をまたいだ全履歴を使う）。
     for entry in st.session_state.chat_log:
-        render_statement_card(entry["seat"], entry["text"])
+        if entry.get("day") == st.session_state.day:
+            render_statement_card(entry["seat"], entry["text"])
 
     # --- 0) 入力欄は必ず毎回呼び出す（AI生成中でも常に発言できるようにするため） ---
     # st.chat_input は日本語IME変換中のEnterキー（変換確定）でも送信されてしまうことがあるため、
@@ -1006,7 +1057,7 @@ def render_day_phase():
     # --- 1) プレイヤーが発言した場合は最優先で処理する ---
     if user_msg:
         text = user_msg.strip()[:150]
-        st.session_state.chat_log.append({"seat": human_seat, "text": text})
+        st.session_state.chat_log.append({"day": st.session_state.day, "seat": human_seat, "text": text})
         alive_ai_seats = [s for s in alive if s != human_seat]
         # 通信はまだ行わず「誰が反応するか」だけ確定し、即座に再描画する
         st.session_state.pending_speakers = decide_speakers(alive_ai_seats)
@@ -1017,12 +1068,16 @@ def render_day_phase():
     if st.session_state.pending_speakers:
         speakers = st.session_state.pending_speakers
         label = "、".join(speakers)
+        seer_seat = st.session_state.get("seer_seat")
         with st.spinner(f"{label} が発言を考え中..."):
             results = generate_replies_concurrently(
-                speakers, st.session_state.day, st.session_state.chat_log, alive, st.session_state.seat_roles
+                speakers, st.session_state.day, st.session_state.chat_log, alive, st.session_state.seat_roles,
+                seat_personalities=st.session_state.get("seat_personalities"),
+                seer_seat=seer_seat,
+                seer_known_facts=seer_known_facts_text() if seer_seat else None,
             )
         for seat, text in results:
-            st.session_state.chat_log.append({"seat": seat, "text": text})
+            st.session_state.chat_log.append({"day": st.session_state.day, "seat": seat, "text": text})
         st.session_state.pending_speakers = []
         st.session_state.next_ai_speak_time = time.time() + random.uniform(
             AI_SPEAK_MIN_INTERVAL, AI_SPEAK_MAX_INTERVAL
@@ -1074,7 +1129,8 @@ def render_night_phase():
 
     with st.expander("📄 本日の会話を振り返る", expanded=False):
         for entry in st.session_state.chat_log:
-            render_statement_card(entry["seat"], entry["text"])
+            if entry.get("day") == st.session_state.day:
+                render_statement_card(entry["seat"], entry["text"])
 
     candidates = [s for s in alive if s != human_seat]
 
@@ -1137,6 +1193,7 @@ def render_night_phase():
                     role, seat, st.session_state.day,
                     st.session_state.chat_log, seat_candidates,
                     known_facts=known_facts,
+                    personality=st.session_state.get("seat_personalities", {}).get(seat),
                 )
             st.session_state.votes[seat] = vote
             st.rerun()
@@ -1179,6 +1236,13 @@ def render_night_phase():
         render_tally_bar(seat, count, is_max=(max_votes > 0 and count == max_votes))
     render_tally_bar(SKIP_LABEL_JP, skip_count, is_skip=True)
 
+    with st.expander("🗳 投票内訳を見る（誰が誰に投票したか）", expanded=False):
+        for voter in sorted(st.session_state.votes.keys()):
+            target = st.session_state.votes[voter]
+            target_label = SKIP_LABEL_JP if target == SKIP_VOTE else target
+            voter_label = f"{voter}（あなた）" if voter == human_seat else voter
+            st.caption(f"{voter_label} → {target_label}")
+
     top_seats = [s for s, c in tally.items() if c == max_votes] if tally else []
 
     if not top_seats:
@@ -1187,23 +1251,32 @@ def render_night_phase():
         st.session_state.pending_elimination = None
         st.info("有効な投票が誰にも集まらなかった（全員がスキップ）ため、今回は誰も追放されません。")
         if st.button("➡ 次の日へ進む", type="primary"):
+            reveal_text = build_vote_reveal_text(st.session_state.day, st.session_state.votes)
             st.session_state.day += 1
             reset_day_state()
+            st.session_state.chat_log.append({"day": st.session_state.day, "seat": "SYSTEM", "text": reveal_text})
             st.rerun()
     elif len(top_seats) >= 2:
         st.session_state.tie_result = True
         st.session_state.pending_elimination = None
         st.info(f"最多票が同数（{', '.join(top_seats)}）のため、今回は誰も追放されません。")
         if st.button("➡ 次の日へ進む", type="primary"):
+            reveal_text = build_vote_reveal_text(st.session_state.day, st.session_state.votes)
             st.session_state.day += 1
             reset_day_state()
+            st.session_state.chat_log.append({"day": st.session_state.day, "seat": "SYSTEM", "text": reveal_text})
             st.rerun()
     else:
         eliminated = top_seats[0]
         st.session_state.pending_elimination = eliminated
         st.warning(f"最多票により **{eliminated}** が追放されます。")
         if st.button("➡ 結果を確定する", type="primary"):
+            reveal_text = build_vote_reveal_text(st.session_state.day, st.session_state.votes)
             process_elimination(eliminated)
+            if not st.session_state.game_over:
+                st.session_state.chat_log.append(
+                    {"day": st.session_state.day, "seat": "SYSTEM", "text": reveal_text}
+                )
             st.rerun()
 
 
