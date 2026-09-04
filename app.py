@@ -37,6 +37,7 @@ from tts import (
     SentenceTTSPipeline,
     synthesize_sentence,
     synthesize_text_batch,
+    concat_mp3_clips,
 )
 from prompts import (
     ROLE_HUMAN,
@@ -938,6 +939,11 @@ def render_voice_sidebar():
             value=st.session_state.get("voice_enabled", True),
             disabled=not fish_key_present,
         )
+        render_manual_replay_button()
+        st.caption(
+            "※ ブラウザの自動再生ポリシーにより音が鳴らない場合は、"
+            "上のボタンで手動再生してください（一度クリックすれば以降は自動再生されます）。"
+        )
 
 
 # ======================================================================
@@ -1124,46 +1130,45 @@ def get_aizuchi_clip_b64():
 
 def render_pending_audio_queue():
     """
-    直前のターンで生成された音声（相槌＋各AIの発言、順番通り）を
-    ブラウザ側で連続再生する。1つの<audio>要素を使い回し、
-    'ended'イベントで次のクリップへ繋げることで、
-    「切れ目のない連続再生」を実現している。
+    直前のターンで生成された音声（相槌＋各AIの発言、順番通り）を再生する。
 
-    描画した瞬間にキューをクリアするため、以降の自動更新(st_autorefresh)や
-    再実行(rerun)で同じ音声が再度流れることはない。
+    重要: 以前は components.html() の中に生の <audio> + JS を置いて再生していたが、
+    Streamlitのカスタムコンポーネントはサンドボックス化された別iframe内で動くため、
+    親ページ側でユーザーが操作(クリック等)していても、その「自動再生の許可」が
+    iframe側には引き継がれず、ブラウザの自動再生ポリシーによって無音のまま
+    再生がブロックされてしまうケースがあった（＝「音が鳴らない」原因）。
+    そのため、ここではStreamlitネイティブの st.audio(..., autoplay=True) を使う。
+    これはアプリ本体と同じフレームで描画されるため、自動再生が通りやすい。
+
+    さらに、それでもブラウザ側の制約で自動再生がブロックされた場合に備えて、
+    直前の音声をボタンクリックで（＝確実なユーザー操作として）再生し直せる
+    フォールバックも用意している（render_manual_replay_button）。
+
+    複数文を連続再生するため、mp3クリップを単純連結して1本の音声として渡す。
     """
     queue = st.session_state.get("pending_playback_queue")
     st.session_state.pending_playback_queue = None  # 二重再生防止：描画したら即クリア
     if not queue:
         return
-    clips_b64 = [c["b64"] for c in queue if c and c.get("b64")]
-    if not clips_b64:
+    clips = [c["b64"] for c in queue if c and c.get("b64")]
+    if not clips:
         return
-    sources_js = ",".join(f'"data:audio/mpeg;base64,{b64}"' for b64 in clips_b64)
-    html = f"""
-    <audio id="uai_tts_player" style="display:none;"></audio>
-    <script>
-      (function() {{
-        const sources = [{sources_js}];
-        let idx = 0;
-        const player = document.getElementById('uai_tts_player');
-        function playNext() {{
-          if (idx >= sources.length) return;
-          player.src = sources[idx];
-          idx += 1;
-          const p = player.play();
-          if (p && p.catch) {{
-            // ブラウザの自動再生ポリシーでブロックされた場合は静かに諦める
-            // （ユーザーの最初の操作以降は通常再生できるようになる）
-            p.catch(function() {{}});
-          }}
-        }}
-        player.addEventListener('ended', playNext);
-        playNext();
-      }})();
-    </script>
+    combined = concat_mp3_clips([base64.b64decode(b64) for b64 in clips])
+    if not combined:
+        return
+    st.session_state.last_audio_bytes = combined  # 手動リプレイ用に保持
+    st.audio(combined, format="audio/mp3", autoplay=True)
+
+
+def render_manual_replay_button():
     """
-    components.html(html, height=0)
+    ブラウザの自動再生ポリシーで音声がブロックされた場合のための保険。
+    ボタンクリックは確実な「ユーザー操作」とみなされるため、
+    ここからの再生はほぼ確実にブロックされない。
+    """
+    if st.session_state.get("last_audio_bytes"):
+        if st.button("🔊 直前の音声を再生する", key="manual_replay_btn"):
+            st.audio(st.session_state.last_audio_bytes, format="audio/mp3", autoplay=True)
 
 
 def render_client_side_timer(deadline_epoch, total_seconds):
@@ -1342,6 +1347,10 @@ def render_day_phase():
         for seat, text, audio_clips in results:
             st.session_state.chat_log.append({"day": st.session_state.day, "seat": seat, "text": text})
             valid_clips = [c for c in audio_clips if c]
+            if fish_key and not valid_clips:
+                # 音声ONでテキストは生成できたのに音声が1つも得られなかった場合は、
+                # 「無言で失敗」にせず、既存の通信状態パネルで確認できるようにする。
+                _record_debug_error(seat, "音声合成に失敗しました（APIキー・残高・ネットワークをご確認ください）")
             if not valid_clips:
                 continue
             if playback_queue and random.random() < AIZUCHI_INSERT_CHANCE:

@@ -19,6 +19,7 @@ Streamlitには一切依存しない独立モジュール。app.py側から
 """
 
 import re
+import sys
 from concurrent.futures import ThreadPoolExecutor
 
 import requests
@@ -57,8 +58,14 @@ def synthesize_sentence(text, api_key, model=DEFAULT_MODEL, reference_id=None, t
     1文をFish Audio API (POST /v1/tts) に送信し、mp3の音声バイト列を返す。
     通信に失敗した場合は例外を投げず、Noneを返す
     （呼び出し側はその文の音声だけを諦めて、テキスト表示は止めない）。
+
+    バックグラウンドスレッドから呼ばれるためStreamlitのAPIは使えない。
+    失敗の詳細は（アプリのログに残るよう）標準エラー出力に書き出しておく。
     """
-    if not text or not api_key:
+    if not text:
+        return None
+    if not api_key:
+        print("[tts] FISH_AUDIO_API_KEY が設定されていないため、音声合成をスキップしました。", file=sys.stderr)
         return None
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -73,9 +80,34 @@ def synthesize_sentence(text, api_key, model=DEFAULT_MODEL, reference_id=None, t
     try:
         resp = requests.post(FISH_TTS_URL, headers=headers, json=payload, timeout=timeout)
         resp.raise_for_status()
+        if not resp.content:
+            print("[tts] Fish Audioから空の音声データが返されました。", file=sys.stderr)
+            return None
         return resp.content
-    except Exception:
+    except requests.exceptions.HTTPError as e:
+        body = ""
+        try:
+            body = e.response.text[:300]
+        except Exception:
+            pass
+        print(f"[tts] Fish Audio APIエラー: {e} / response: {body}", file=sys.stderr)
         return None
+    except Exception as e:
+        print(f"[tts] Fish Audio 通信エラー: {e}", file=sys.stderr)
+        return None
+
+
+def concat_mp3_clips(clips):
+    """
+    複数のmp3バイト列を単純連結し、1本のmp3として返す。
+    MP3はフレーム単位のフォーマットのため、素朴な連結でもほとんどのプレイヤー
+    （ブラウザのHTMLAudioElementを含む）で問題なく連続再生できる。
+    Noneや空の要素は無視する。全て空ならNoneを返す。
+    """
+    valid = [c for c in (clips or []) if c]
+    if not valid:
+        return None
+    return b"".join(valid)
 
 
 def synthesize_text_batch(text, api_key, reference_id, executor, model=DEFAULT_MODEL, timeout=REQUEST_TIMEOUT + 10):
