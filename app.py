@@ -906,6 +906,19 @@ div[data-testid="stAudio"] audio {
     height: 32px;
     width: 100%;
 }
+
+/* ---- マイク録音ウィジェット(st.audio_input)の波形表示を消す。
+       録音中・録音後プレビューの両方とも波形は<canvas>で描画されている。
+       display:noneにすると一部ブラウザでcanvasのサイズ計算が0になり
+       ウィジェット側のスクリプトエラーの原因になることがあるため、
+       代わりに visibility+高さ0 で見た目だけ消す ---- */
+div[data-testid="stAudioInput"] canvas {
+    visibility: hidden !important;
+    height: 0 !important;
+    max-height: 0 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+}
 </style>
 """
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
