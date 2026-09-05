@@ -31,6 +31,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import streamlit as st
 import streamlit.components.v1 as components
+from streamlit_mic_recorder import mic_recorder
 from dotenv import load_dotenv
 from openai import OpenAI
 from streamlit_autorefresh import st_autorefresh
@@ -142,14 +143,17 @@ def get_stt_model_name() -> str:
     return name or DEFAULT_STT_MODEL_NAME
 
 
-def transcribe_audio(audio_bytes: bytes) -> str:
+def transcribe_audio(audio_bytes: bytes, filename: str = "voice_input.wav", content_type: str = "audio/wav") -> str:
     """
-    録音した音声(wavバイト列)を、OpenRouterの音声文字起こしエンドポイント
+    録音した音声バイト列を、OpenRouterの音声文字起こしエンドポイント
     (POST /audio/transcriptions、Whisper系モデル)でテキストに変換する。
 
     OpenRouterはこのエンドポイントもOpenAI互換のリクエスト形式で受け付けるため、
     LLM呼び出しと同じ get_client()（同じAPIキー・base_url）をそのまま使い回せる。
     専用のAPIキーやライブラリの追加は不要。
+
+    filename/content_type は録音側（streamlit-mic-recorder）が実際に
+    出力した形式（wavまたはwebm）に合わせて呼び出し側から渡す。
 
     失敗した場合は空文字列を返す（呼び出し側で「うまく聞き取れませんでした」
     という案内を出し、手入力へフォールバックする想定）。
@@ -160,13 +164,44 @@ def transcribe_audio(audio_bytes: bytes) -> str:
         client = get_client()
         result = client.audio.transcriptions.create(
             model=get_stt_model_name(),
-            file=("voice_input.wav", audio_bytes, "audio/wav"),
+            file=(filename, audio_bytes, content_type),
             language="ja",
         )
         return (getattr(result, "text", "") or "").strip()
     except Exception as e:
         _record_debug_error("音声入力の文字起こし", e)
         return ""
+
+
+def record_voice_input():
+    """
+    streamlit-mic-recorderの「🎤 音声で入力」/「⏹ 録音停止」ボタンを描画する。
+    波形表示は無く、ボタンの表記が切り替わるだけのシンプルなUI。
+
+    just_once=True のため、録音が完了した直後の1回だけ音声データを返し、
+    以降のrerunでは（再録音するまで）Noneを返す。これにより、呼び出し側で
+    「同じ録音を何度も文字起こししてしまう」対策の重複チェックが不要になる。
+
+    format引数（wav指定）は比較的新しいバージョンのstreamlit-mic-recorderに
+    のみ存在するため、無い場合（古いバージョン）でも動くようフォールバックする。
+
+    戻り値: (音声バイト列, フォーマット文字列("wav"など)) または (None, None)。
+    """
+    kwargs = dict(
+        start_prompt="🎤 音声で入力",
+        stop_prompt="⏹ 録音停止",
+        just_once=True,
+        use_container_width=True,
+        key="voice_mic_recorder",
+    )
+    try:
+        audio_dict = mic_recorder(format="wav", **kwargs)
+    except TypeError:
+        audio_dict = mic_recorder(**kwargs)
+    if not audio_dict or not audio_dict.get("bytes"):
+        return None, None
+    return audio_dict["bytes"], audio_dict.get("format", "wav")
+
 
 
 # ======================================================================
@@ -895,30 +930,6 @@ div[data-testid="stFormSubmitButton"] > button {
     font-weight: 700;
     margin: 4px 0 10px;
 }
-
-/* ---- AIの読み上げ音声プレイヤーを少しコンパクトにする。
-       完全に非表示にする方法はブラウザによって効かないことがあるため、
-       代わりに常に同じ場所（発言入力欄のすぐ上）に、小さく表示する ---- */
-div[data-testid="stAudio"] {
-    margin: 0 0 4px 0 !important;
-}
-div[data-testid="stAudio"] audio {
-    height: 32px;
-    width: 100%;
-}
-
-/* ---- マイク録音ウィジェット(st.audio_input)の波形表示を消す。
-       録音中・録音後プレビューの両方とも波形は<canvas>で描画されている。
-       display:noneにすると一部ブラウザでcanvasのサイズ計算が0になり
-       ウィジェット側のスクリプトエラーの原因になることがあるため、
-       代わりに visibility+高さ0 で見た目だけ消す ---- */
-div[data-testid="stAudioInput"] canvas {
-    visibility: hidden !important;
-    height: 0 !important;
-    max-height: 0 !important;
-    margin: 0 !important;
-    padding: 0 !important;
-}
 </style>
 """
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
@@ -1154,7 +1165,7 @@ def render_title_screen():
         # このクリックに直結させて無音を1回再生しておくことで、後でタイマー経由
         # （＝クリックを伴わずに）自動再生される最初のAIの発言がブラウザの
         # 自動再生制限でブロックされる事態を防ぐ（_silent_wav_bytesのコメント参照）。
-        st.audio(_silent_wav_bytes(), format="audio/wav", autoplay=True)
+        play_audio_hidden(_silent_wav_bytes(), mime="audio/wav")
         initialize_game()
         st.session_state.screen = "game"
         st.rerun()
@@ -1258,7 +1269,7 @@ def _silent_wav_bytes(duration_sec=0.15, sample_rate=8000):
     無音の極小WAVファイルをその場で生成する（ネットワーク不要・依存ライブラリ不要）。
 
     用途: 「ゲームを開始する」ボタンのクリック直後に、この無音音声を
-    st.audio(..., autoplay=True) で1回再生しておく。ブラウザの自動再生制限
+    play_audio_hidden() で1回再生しておく。ブラウザの自動再生制限
     （音声付きのメディアは、そのページ/オリジンでユーザー操作が一度も無いと
     自動再生できない）は、多くの場合いったん何か1つでも音声の自動再生に
     成功すると、それ以降のセッションでは自動再生が許可されるようになる。
@@ -1276,14 +1287,60 @@ def _silent_wav_bytes(duration_sec=0.15, sample_rate=8000):
     return buf.getvalue()
 
 
-def play_clip_and_wait(clip_bytes, dock=None, extra_delay=AUDIO_SLEEP_BUFFER_SECONDS):
+def play_audio_hidden(audio_bytes, mime="audio/mp3"):
     """
-    音声クリップを1つ再生し、その音声の実際の長さ分だけ処理を止めて待つ。
+    st.audio() を使わず、画面上に一切要素を残さない形で音声を自動再生する。
 
-    dock（st.emptyのプレースホルダー）が渡された場合は、そこに書き込むことで
-    常に画面上の同じ場所（発言入力欄のすぐ上）に音声バーを表示する。
-    渡されない場合は、呼び出された時点の位置にそのまま表示する
-    （フォールバック。手動リプレイなど）。
+    実装:
+      streamlit.components.v1.html() が生成するiframeには
+      sandbox="... allow-same-origin ..." が付与されているため、
+      iframe内のJavaScriptから window.parent.document
+      （＝Streamlitアプリ本体のページ）を直接操作できる。これを利用して、
+      <audio>要素をiframeの中にではなく、アプリ本体のdocumentに直接追加する。
+
+      こうすることで:
+        1. 音声プレイヤーはStreamlitのUI上のどの場所にも要素として現れない
+           （st.audioをCSSで隠す方式と違い、そもそも表示用の場所を持たない）。
+        2. iframe自体も幅0・高さ0で埋め込まれるため、隙間・枠線なども残らない。
+        3. 再生はアプリ本体（親ページ）そのもののオリジンで行われるため、
+           ブラウザの自動再生ポリシー（そのページで一度でもユーザー操作が
+           あれば自動再生を許可する）の恩恵をそのまま受けられる。
+
+      呼び出すたびに、前回このヘルパーが追加した<audio>要素を確実に
+      削除してから新しい要素を追加するので、隠し要素が際限なく
+      増え続けることはない。
+    """
+    if not audio_bytes:
+        return
+    b64 = base64.b64encode(audio_bytes).decode("ascii")
+    html = f"""
+    <script>
+    (function() {{
+        try {{
+            var doc = window.parent.document;
+            var old = doc.getElementById("uai-hidden-audio");
+            if (old) {{ old.pause(); old.remove(); }}
+            var audio = doc.createElement("audio");
+            audio.id = "uai-hidden-audio";
+            audio.src = "data:{mime};base64,{b64}";
+            audio.autoplay = true;
+            audio.style.display = "none";
+            audio.style.width = "0px";
+            audio.style.height = "0px";
+            doc.body.appendChild(audio);
+        }} catch (e) {{
+            console.error("[UAI] hidden audio playback failed:", e);
+        }}
+    }})();
+    </script>
+    """
+    components.html(html, height=0, width=0)
+
+
+def play_clip_and_wait(clip_bytes, extra_delay=AUDIO_SLEEP_BUFFER_SECONDS):
+    """
+    音声クリップを1つ、画面に表示されない形で再生し、
+    その音声の実際の長さ分だけ処理を止めて待つ。
 
     重要（「途中で止まる」バグの根本原因と対策）:
     以前は「テキストを全部chat_logに入れて音声だけキューに積み、次のrerunで
@@ -1302,14 +1359,10 @@ def play_clip_and_wait(clip_bytes, dock=None, extra_delay=AUDIO_SLEEP_BUFFER_SEC
     副次効果として、「音声が鳴り始めた瞬間にその発言のテキストが表示される」
     という体感の同期も、このタイミング制御によって自然に実現される
     （呼び出し側でテキスト表示の直後にこの関数を呼ぶ設計になっている）。
-
-    バックグラウンドから呼ばれるわけではなくメインスクリプトの流れの中で
-    呼ばれるため、st.audio自体は問題なく使える。
     """
     if not clip_bytes:
         return
-    target = dock if dock is not None else st
-    target.audio(clip_bytes, format="audio/mp3", autoplay=True)
+    play_audio_hidden(clip_bytes, mime="audio/mp3")
     time.sleep(get_mp3_duration_seconds(clip_bytes) + extra_delay)
 
 
@@ -1321,7 +1374,7 @@ def render_manual_replay_button():
     """
     if st.session_state.get("last_audio_bytes"):
         if st.button("🔊 直前の音声を再生する", key="manual_replay_btn"):
-            st.audio(st.session_state.last_audio_bytes, format="audio/mp3", autoplay=True)
+            play_audio_hidden(st.session_state.last_audio_bytes, mime="audio/mp3")
 
 
 def render_client_side_timer(deadline_epoch, total_seconds):
@@ -1431,20 +1484,6 @@ def render_day_phase():
         if entry.get("day") == st.session_state.day:
             render_statement_card(entry["seat"], entry["text"])
 
-    # --- AIの音声を再生するための固定枠 ---
-    # 発言入力欄と同じ「画面下部に常に固定される」コンテナ(st.bottom)の中に、
-    # 入力欄より先に空のプレースホルダーを置いておく。こうすると、実際に
-    # 音声を再生するタイミング（このあとのstep 2、コード上はずっと後ろ）で
-    # このプレースホルダーに書き込んでも、見た目の位置は「入力欄のすぐ上」に
-    # 固定されたままになる（Streamlitのプレースホルダーは、生成した時点の
-    # 位置を保持したまま、後から中身だけ差し替えられるため）。
-    #
-    # 補足: 当初はCSSで音声バー自体を完全に非表示にしようとしたが、
-    # ブラウザ環境によっては効かない（再生中だけ何らかの形で表示されてしまう）
-    # ことがあったため、代わりに「常に同じ、決まった場所に」表示する方針にした。
-    with st.bottom:
-        audio_dock = st.empty()
-
     # --- 音声入力（任意）：マイクで録音した内容をWhisperで文字起こしし、
     #     下の発言欄に自動で入力する。送信は今まで通りボタンを押した時だけ
     #     行われるので、認識結果はここで一度確認・修正してから送れる。
@@ -1454,49 +1493,31 @@ def render_day_phase():
     # （ウィジェット生成"後"に同じ方法で値を変えることはできないので、
     #   このブロックは必ず下の st.text_input より前に置く必要がある）。
     text_input_key = f"chat_input_area_{st.session_state.day}"
-    if "voice_input_enabled" not in st.session_state:
-        st.session_state.voice_input_enabled = False
-    if "_last_voice_audio_sig" not in st.session_state:
-        st.session_state._last_voice_audio_sig = None
 
     user_msg = None
     if not time_up:
         with st.bottom:
-            # 録音パネル用の枠。マイクボタンより先に確保しておくことで、
-            # 開いた時に「マイクボタン＋発言欄」の行のすぐ上に表示される。
-            recorder_slot = st.empty()
-
             # マイクボタンは発言欄と同じ行の左側に置きたいが、
             # st.form の中では通常のst.button()が使えない（st.form_submit_button
             # だと、押した瞬間にclear_on_submitで入力中の下書きまで消えてしまう）
             # ため、フォームの外に置いた列(col_mic)とフォーム自体(col_form)を
             # 横に並べる形にしている。
-            col_mic, col_form = st.columns([1, 7], vertical_alignment="bottom")
+            col_mic, col_form = st.columns([2, 6], vertical_alignment="bottom")
             with col_mic:
-                if st.button(
-                    "🎤", key="mic_toggle_btn", use_container_width=True,
-                    help="タップして録音パネルを開く/閉じる（マイクの許可を求められたら許可してください）",
-                ):
-                    st.session_state.voice_input_enabled = not st.session_state.voice_input_enabled
+                raw_bytes, rec_format = record_voice_input()
 
-            if st.session_state.voice_input_enabled:
-                audio_value = recorder_slot.audio_input("発言を録音", label_visibility="collapsed")
-                if audio_value is not None:
-                    raw_bytes = audio_value.getvalue()
-                    # 同じ録音を毎回のrerunで何度も文字起こししないよう、
-                    # 内容が変わった時（＝新しく録音し直した時）だけ処理する。
-                    sig = (len(raw_bytes), hash(raw_bytes[:4096]))
-                    if raw_bytes and sig != st.session_state._last_voice_audio_sig:
-                        st.session_state._last_voice_audio_sig = sig
-                        with st.spinner("文字起こし中..."):
-                            transcribed = transcribe_audio(raw_bytes)
-                        if transcribed:
-                            st.session_state[text_input_key] = transcribed[:150]
-                            st.session_state.voice_input_enabled = False  # 成功したらパネルは閉じる
-                        else:
-                            st.warning(
-                                "うまく聞き取れませんでした。もう一度録音するか、直接入力してください。"
-                            )
+            if raw_bytes:
+                mime = f"audio/{rec_format or 'wav'}"
+                with st.spinner("文字起こし中..."):
+                    transcribed = transcribe_audio(
+                        raw_bytes, filename=f"voice_input.{rec_format or 'wav'}", content_type=mime
+                    )
+                if transcribed:
+                    st.session_state[text_input_key] = transcribed[:150]
+                else:
+                    st.warning(
+                        "うまく聞き取れませんでした。もう一度録音するか、直接入力してください。"
+                    )
 
             with col_form:
                 with st.form(
@@ -1568,7 +1589,7 @@ def render_day_phase():
                 aizuchi_b64 = get_aizuchi_clip_b64()
                 if aizuchi_b64:
                     aizuchi_bytes = base64.b64decode(aizuchi_b64)
-                    play_clip_and_wait(aizuchi_bytes, dock=audio_dock)
+                    play_clip_and_wait(aizuchi_bytes)
                     replay_clips.append(aizuchi_bytes)
 
             # 発言のテキストは、その音声が再生され始める「今」確定・表示する
@@ -1577,7 +1598,7 @@ def render_day_phase():
             render_statement_card(seat, text)
 
             for clip in valid_clips:
-                play_clip_and_wait(clip, dock=audio_dock)
+                play_clip_and_wait(clip)
                 replay_clips.append(clip)
                 any_played = True
 
