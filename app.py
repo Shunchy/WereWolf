@@ -945,8 +945,17 @@ div[data-testid="stFormSubmitButton"] > button {
 
 /* ---- AIの読み上げ音声プレイヤーは画面に表示しない（自動再生のみ行う）。
        再生の仕組み自体はst.audio()のまま（表示/非表示はCSSだけの問題で、
-       再生の安定性には影響しない） ---- */
-div[data-testid="stAudio"] {
+       再生の安定性には影響しない）。
+       st.container(key="ai_voice_dock")で囲んだ枠ごと消すことで、
+       Streamlitのバージョンによる内部DOM構造の違いに左右されないようにする。
+       data-testid直指定の行は、それでも拾いきれない場合の保険。 ---- */
+div.st-key-ai_voice_dock {
+    display: none !important;
+    height: 0 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+}
+[data-testid="stAudio"] {
     display: none !important;
     height: 0 !important;
     margin: 0 !important;
@@ -1554,8 +1563,16 @@ def render_day_phase():
     # このプレースホルダーに書き込んでも、見た目の位置は「入力欄のすぐ上」に
     # 固定されたままになる（Streamlitのプレースホルダーは、生成した時点の
     # 位置を保持したまま、後から中身だけ差し替えられるため）。
+    #
+    # st.container(key="ai_voice_dock") で囲んでおくことで、CSS側からは
+    # ".st-key-ai_voice_dock" というクラスで丸ごと非表示にできる。
+    # data-testid="stAudio" 直指定のCSSだとStreamlitのバージョンによって
+    # 内部のDOM構造（audio要素そのものにtestidが付くのか、それを包むdivに
+    # 付くのか等）が変わり、非表示にできないことがあったため、
+    # 「このコンテナの中身は中身が何であれ丸ごと消す」方式に変更した。
     with st.bottom:
-        audio_dock = st.empty()
+        with st.container(key="ai_voice_dock"):
+            audio_dock = st.empty()
 
     # --- 音声入力（任意）：マイクで録音した内容をWhisperで文字起こしし、
     #     下の発言欄に自動で入力する。送信は今まで通りボタンを押した時だけ
