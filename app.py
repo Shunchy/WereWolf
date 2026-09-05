@@ -30,6 +30,7 @@ import uuid
 import wave
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import requests
 import streamlit as st
 import streamlit.components.v1 as components
 from streamlit_mic_recorder import mic_recorder
@@ -144,31 +145,53 @@ def get_stt_model_name() -> str:
     return name or DEFAULT_STT_MODEL_NAME
 
 
-def transcribe_audio(audio_bytes: bytes, filename: str = "voice_input.wav", content_type: str = "audio/wav") -> str:
+def transcribe_audio(audio_bytes: bytes, fmt: str = "wav") -> str:
     """
     録音した音声バイト列を、OpenRouterの音声文字起こしエンドポイント
     (POST /audio/transcriptions、Whisper系モデル)でテキストに変換する。
 
-    OpenRouterはこのエンドポイントもOpenAI互換のリクエスト形式で受け付けるため、
-    LLM呼び出しと同じ get_client()（同じAPIキー・base_url）をそのまま使い回せる。
-    専用のAPIキーやライブラリの追加は不要。
+    重要（「必ず聞き取り失敗になる」バグの原因と対策）:
+    以前はOpenAI Python SDKの client.audio.transcriptions.create(file=...) を
+    使っていたが、これは内部的に multipart/form-data 形式でアップロードする。
+    ところがOpenRouterの /audio/transcriptions エンドポイントは、
+    現状このmultipart経由のアップロードがゲートウェイ側で壊れており
+    （境界文字列のパースに失敗する既知の不具合）、毎回失敗していた。
 
-    filename/content_type は録音側（streamlit-mic-recorder）が実際に
-    出力した形式（wavまたはwebm）に合わせて呼び出し側から渡す。
+    OpenRouterが案内している、正しく動作する形式は「音声をbase64にして
+    JSONボディのinput_audioフィールドに乗せる」方式のため、ここでは
+    OpenAI SDKを経由せず、requestsで直接そのJSON形式のリクエストを送る。
+
+    fmt: 録音側（streamlit-mic-recorder）が実際に出力した形式
+    （"wav"または"webm"）。input_audio.formatフィールドにそのまま渡す。
 
     失敗した場合は空文字列を返す（呼び出し側で「うまく聞き取れませんでした」
     という案内を出し、手入力へフォールバックする想定）。
     """
     if not audio_bytes:
         return ""
+    api_key = get_api_key()
+    if not api_key:
+        return ""
     try:
-        client = get_client()
-        result = client.audio.transcriptions.create(
-            model=get_stt_model_name(),
-            file=(filename, audio_bytes, content_type),
-            language="ja",
+        b64_audio = base64.b64encode(audio_bytes).decode("ascii")
+        resp = requests.post(
+            f"{BASE_URL}/audio/transcriptions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://github.com/",
+                "X-Title": "Reverse Werewolf Game",
+            },
+            json={
+                "model": get_stt_model_name(),
+                "input_audio": {"data": b64_audio, "format": fmt or "wav"},
+                "language": "ja",
+            },
+            timeout=LLM_TIMEOUT_SECONDS,
         )
-        return (getattr(result, "text", "") or "").strip()
+        resp.raise_for_status()
+        data = resp.json()
+        return (data.get("text") or "").strip()
     except Exception as e:
         _record_debug_error("音声入力の文字起こし", e)
         return ""
@@ -1603,11 +1626,8 @@ def render_day_phase():
                     raw_bytes, rec_format = record_voice_input()
 
             if raw_bytes:
-                mime = f"audio/{rec_format or 'wav'}"
                 with st.spinner("文字起こし中..."):
-                    transcribed = transcribe_audio(
-                        raw_bytes, filename=f"voice_input.{rec_format or 'wav'}", content_type=mime
-                    )
+                    transcribed = transcribe_audio(raw_bytes, fmt=rec_format or "wav")
                 if transcribed:
                     st.session_state[text_input_key] = transcribed[:150]
                 else:
