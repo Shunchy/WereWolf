@@ -21,6 +21,7 @@ UAI - Streamlit Webアプリ（自由チャット版・社会的推理ゲーム�
 
 import base64
 import io
+import itertools
 import os
 import random
 import re
@@ -522,7 +523,18 @@ def generate_replies_concurrently(
 ):
     """
     複数のAIの発言を、実際に並行して(同時に)通信・生成する。
-    完了した順に (seat, text, audio_clips) のタプルとして返す。
+    完了した順に (seat, text, audio_clips) のタプルを"その場で"yieldする
+    ジェネレータ（以前は全員分をリストにまとめてから一括で返していた）。
+
+    重要（「誰かが喋っている間も他のAIは裏で考え続ける」ようにするための変更）:
+    呼び出し側は、1件受け取るたびにすぐテキストを表示し、その音声の再生
+    （time.sleep()を含む）を行ってよい。まだ完了していない他の座席の
+    LLM生成・TTS合成は、このジェネレータの中のThreadPoolExecutorの
+    別スレッド上でそのまま並行して進み続けるため、呼び出し側が
+    1件の再生に時間をかけている間も、他のAIの「考え中」は止まらない
+    （＝あるAIがFish Audioで喋っている間、他のAIは裏でLLM生成・音声合成を
+    進めておける）。
+
     audio_clips はその発言ぶんの音声バイト列を1件だけ含むリスト（TTS無効/失敗時は []）。
     seat_personalities: {座席名: 個性辞書} の対応表。各AIの発言トーンに反映する。
     seer_seat / seer_known_facts: 占い師AIが話者に含まれる場合、自身の調査結果を
@@ -536,13 +548,12 @@ def generate_replies_concurrently(
     暗黙に走ってしまい、たとえ以下のタイムアウト処理が正しく働いていても、
     結局そこで固まってしまう（これが「永遠に考え中」の真因だった）。
     そのため、ここでは `with` を使わず、shutdown(wait=False) で
-    「返事が来なくても待たずに関数を抜ける」ようにしている。
-    取り残されたスレッドは、バックグラウンドで終わるか、やがて例外になるかする
-    だけで、以後の画面表示をブロックすることはない。
+    「返事が来なくても待たずに関数を抜ける」ようにしている
+    （ジェネレータなので、呼び出し側が最後まで受け取り終えた時、または
+    　途中で受け取るのをやめた時のどちらでも、このfinallyは実行される）。
     """
     seat_personalities = seat_personalities or {}
     seat_reference_ids = seat_reference_ids or {}
-    results = []
     hard_timeout = LLM_TIMEOUT_SECONDS * 3 + 10  # リトライ3回分+余裕を持った絶対上限
     executor = ThreadPoolExecutor(max_workers=max(1, len(speakers)))
     try:
@@ -555,6 +566,7 @@ def generate_replies_concurrently(
             ): seat
             for seat in speakers
         }
+        done_seats = set()
         try:
             for future in as_completed(future_to_seat, timeout=hard_timeout + 5):
                 seat = future_to_seat[future]
@@ -563,21 +575,20 @@ def generate_replies_concurrently(
                 except Exception as e:
                     text, audio_clips = random.choice(_FALLBACK_LINES), []
                     _record_debug_error(seat, e)
-                results.append((seat, text, audio_clips))
+                done_seats.add(seat)
+                yield seat, text, audio_clips
         except Exception as e:
             # as_completed自体が全体タイムアウトした場合もここで捕捉し、必ず先に進める
             _record_debug_error("全体", e)
 
         # 何らかの理由で結果が得られなかった座席は、必ずフォールバックで埋める
-        done_seats = {seat for seat, _, _ in results}
         for future, seat in future_to_seat.items():
             if seat not in done_seats:
-                results.append((seat, random.choice(_FALLBACK_LINES), []))
                 _record_debug_error(seat, "全体タイムアウトにより打ち切り")
+                yield seat, random.choice(_FALLBACK_LINES), []
     finally:
         # wait=False: 未完了のスレッドを待たずに、ここで即座に関数を抜ける
         executor.shutdown(wait=False, cancel_futures=True)
-    return results
 
 
 def _record_debug_error(seat, error):
@@ -1608,16 +1619,15 @@ def render_day_phase():
         voice_on = st.session_state.get("voice_enabled", True)
         fish_key = get_fish_api_key() if voice_on else ""
         tts_executor = get_tts_executor() if fish_key else None
-        with st.spinner(f"{label} が発言を考え中..."):
-            results = generate_replies_concurrently(
-                speakers, st.session_state.day, st.session_state.chat_log, alive, st.session_state.seat_roles,
-                seat_personalities=st.session_state.get("seat_personalities"),
-                seer_seat=seer_seat,
-                seer_known_facts=seer_known_facts_text() if seer_seat else None,
-                tts_api_key=fish_key or None,
-                seat_reference_ids={s: get_seat_reference_id(s) for s in speakers},
-                tts_executor=tts_executor,
-            )
+        reply_stream = generate_replies_concurrently(
+            speakers, st.session_state.day, st.session_state.chat_log, alive, st.session_state.seat_roles,
+            seat_personalities=st.session_state.get("seat_personalities"),
+            seer_seat=seer_seat,
+            seer_known_facts=seer_known_facts_text() if seer_seat else None,
+            tts_api_key=fish_key or None,
+            seat_reference_ids={s: get_seat_reference_id(s) for s in speakers},
+            tts_executor=tts_executor,
+        )
 
         # 発言者1人ずつ「テキストを確定・表示 → その音声を再生 → 実際の長さぶん待つ」
         # の順で処理する。これにより、次の人の発言（と音声）に進むのは必ず
@@ -1626,9 +1636,27 @@ def render_day_phase():
         # （このループはrerunを挟まず、この1回のスクリプト実行の中で完結する。
         #   自動更新(st_autorefresh)が再生の途中に割り込むことはない。詳細は
         #   play_clip_and_wait() のコメントを参照。）
+        #
+        # 重要: generate_replies_concurrently はジェネレータになっており、
+        # ここで1人分をtime.sleep()で再生している間も、まだ順番が来ていない
+        # 他のAIのLLM生成・TTS合成はThreadPoolExecutorの別スレッド上で
+        # 裏で進み続ける（＝表示・再生だけが「前の音声が終わるまで」直列に
+        # なり、思考・音声合成そのものは止めない）。最初の1人分が届くまでは
+        # まだ何も表示できないため、そこだけスピナーで待っていることを示す。
         replay_clips = []
         any_played = False
-        for seat, text, audio_clips in results:
+        first_seat = first_text = first_clips = None
+        try:
+            with st.spinner(f"{label} が発言を考え中..."):
+                first_seat, first_text, first_clips = next(reply_stream)
+        except StopIteration:
+            pass
+
+        pending_results = itertools.chain(
+            [(first_seat, first_text, first_clips)] if first_seat is not None else [],
+            reply_stream,
+        )
+        for seat, text, audio_clips in pending_results:
             valid_clips = [c for c in audio_clips if c]
             if fish_key and not valid_clips:
                 # 音声ONでテキストは生成できたのに音声が1つも得られなかった場合は、
