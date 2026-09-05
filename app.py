@@ -20,26 +20,26 @@ UAI - Streamlit Webアプリ（自由チャット版・社会的推理ゲーム�
 """
 
 import base64
+import io
 import os
 import random
 import re
 import time
 import uuid
+import wave
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import streamlit as st
 import streamlit.components.v1 as components
+from streamlit_mic_recorder import mic_recorder
 from dotenv import load_dotenv
 from openai import OpenAI
 from streamlit_autorefresh import st_autorefresh
 
 from tts import (
-    SentenceTTSPipeline,
     synthesize_sentence,
-    synthesize_text_batch,
     concat_mp3_clips,
     get_mp3_duration_seconds,
-    REQUEST_TIMEOUT as TTS_REQUEST_TIMEOUT,
 )
 from prompts import (
     ROLE_HUMAN,
@@ -66,6 +66,11 @@ load_dotenv()  # ローカル実行時: .env を読み込む
 MODEL_NAME = "openrouter/free"
 BASE_URL = "https://openrouter.ai/api/v1"
 
+# ---- 音声入力(STT / OpenRouter Whisper) 関連設定 ----
+# OpenRouterの /audio/transcriptions エンドポイント用モデル。
+# LLM呼び出しと同じ base_url・APIキーで叩けるため、専用のAPIキーは不要。
+DEFAULT_STT_MODEL_NAME = "openai/whisper-large-v3"
+
 SEATS = [f"AI-{i:02d}" for i in range(1, 6)]
 
 DAY_PHASE_SECONDS = 180          # 昼フェーズ（自由チャット）の制限時間（秒）
@@ -80,12 +85,7 @@ LLM_TIMEOUT_SECONDS = 15         # OpenRouterへの通信タイムアウト（�
 
 # ---- 音声読み上げ(TTS / Fish Audio) 関連設定 ----
 FISH_MODEL_NAME = "s2.1-pro-free"   # Fish Audioのモデル（無料枠。品質保証は無いが検証用途には十分）
-TTS_MAX_WORKERS = 8                 # TTSリクエスト用スレッドプールの同時実行数
-                                     # (MAX_SIMULTANEOUS_SPEAKERS=2 が同時に複数文をTTSへ
-                                     #  投げても詰まりにくいよう、以前の4から引き上げ)
-TTS_COLLECT_TIMEOUT_SECONDS = TTS_REQUEST_TIMEOUT + 15  # tts.py の collect_audio() 側の予算と合わせる。
-                                        # generate_replies_concurrently の全体タイムアウト計算で、
-                                        # 「LLM生成が終わった後のTTS取得待ち時間」を必ず加算するために使う。
+TTS_MAX_WORKERS = 4                 # TTSリクエスト用スレッドプールの同時実行数
 AIZUCHI_LINES = [                   # 複数AIが連続で話す際に、間に挟む短い相槌
     "うんうん。",
     "なるほどね。",
@@ -131,6 +131,79 @@ def get_client():
     )
 
 
+def get_stt_model_name() -> str:
+    """音声入力(文字起こし)に使うOpenRouterのモデル名。未設定ならデフォルトを使う。"""
+    name = ""
+    try:
+        name = st.secrets.get("OPENROUTER_STT_MODEL", "")
+    except Exception:
+        name = ""
+    if not name:
+        name = os.getenv("OPENROUTER_STT_MODEL", "")
+    return name or DEFAULT_STT_MODEL_NAME
+
+
+def transcribe_audio(audio_bytes: bytes, filename: str = "voice_input.wav", content_type: str = "audio/wav") -> str:
+    """
+    録音した音声バイト列を、OpenRouterの音声文字起こしエンドポイント
+    (POST /audio/transcriptions、Whisper系モデル)でテキストに変換する。
+
+    OpenRouterはこのエンドポイントもOpenAI互換のリクエスト形式で受け付けるため、
+    LLM呼び出しと同じ get_client()（同じAPIキー・base_url）をそのまま使い回せる。
+    専用のAPIキーやライブラリの追加は不要。
+
+    filename/content_type は録音側（streamlit-mic-recorder）が実際に
+    出力した形式（wavまたはwebm）に合わせて呼び出し側から渡す。
+
+    失敗した場合は空文字列を返す（呼び出し側で「うまく聞き取れませんでした」
+    という案内を出し、手入力へフォールバックする想定）。
+    """
+    if not audio_bytes:
+        return ""
+    try:
+        client = get_client()
+        result = client.audio.transcriptions.create(
+            model=get_stt_model_name(),
+            file=(filename, audio_bytes, content_type),
+            language="ja",
+        )
+        return (getattr(result, "text", "") or "").strip()
+    except Exception as e:
+        _record_debug_error("音声入力の文字起こし", e)
+        return ""
+
+
+def record_voice_input():
+    """
+    streamlit-mic-recorderの「🎤 音声で入力」/「⏹ 録音停止」ボタンを描画する。
+    波形表示は無く、ボタンの表記が切り替わるだけのシンプルなUI。
+
+    just_once=True のため、録音が完了した直後の1回だけ音声データを返し、
+    以降のrerunでは（再録音するまで）Noneを返す。これにより、呼び出し側で
+    「同じ録音を何度も文字起こししてしまう」対策の重複チェックが不要になる。
+
+    format引数（wav指定）は比較的新しいバージョンのstreamlit-mic-recorderに
+    のみ存在するため、無い場合（古いバージョン）でも動くようフォールバックする。
+
+    戻り値: (音声バイト列, フォーマット文字列("wav"など)) または (None, None)。
+    """
+    kwargs = dict(
+        start_prompt="🎤 音声で入力",
+        stop_prompt="⏹ 録音停止",
+        just_once=True,
+        use_container_width=True,
+        key="voice_mic_recorder",
+    )
+    try:
+        audio_dict = mic_recorder(format="wav", **kwargs)
+    except TypeError:
+        audio_dict = mic_recorder(**kwargs)
+    if not audio_dict or not audio_dict.get("bytes"):
+        return None, None
+    return audio_dict["bytes"], audio_dict.get("format", "wav")
+
+
+
 # ======================================================================
 # 音声読み上げ(TTS / Fish Audio) 用のAPIキー・実行環境
 # ======================================================================
@@ -155,6 +228,44 @@ def get_fish_reference_id() -> str:
     if not ref:
         ref = os.getenv("FISH_AUDIO_REFERENCE_ID", "")
     return ref
+
+
+def get_fish_reference_ids() -> list:
+    """
+    AIごとに声を変えるための、reference_id(声のID)のプール。
+    FISH_AUDIO_REFERENCE_IDS（複数形）にカンマまたは改行区切りで
+    最大5つ（座席数ぶん）まで設定できる。例:
+        FISH_AUDIO_REFERENCE_IDS = "id1,id2,id3,id4,id5"
+    各IDは https://fish.audio 上の音声モデルのIDで、URLや「コピー」ボタンから
+    取得できる（詳しくは docs.fish.audio 参照）。
+    未設定の場合は、従来の単一のFISH_AUDIO_REFERENCE_IDにフォールバックする
+    （その場合、全AIが同じ声になる。さらにそれも未設定ならFish Audioの
+    デフォルト音声になる）。
+    """
+    raw = ""
+    try:
+        raw = st.secrets.get("FISH_AUDIO_REFERENCE_IDS", "")
+    except Exception:
+        raw = ""
+    if not raw:
+        raw = os.getenv("FISH_AUDIO_REFERENCE_IDS", "")
+    ids = [x.strip() for x in re.split(r"[,\n]+", raw) if x.strip()]
+    if ids:
+        return ids
+    single = get_fish_reference_id()
+    return [single] if single else []
+
+
+def get_seat_reference_id(seat: str) -> str:
+    """
+    この座席(AI)に割り当てられた声(reference_id)を返す。
+    initialize_game() でゲーム開始時に座席ごとの声を固定で割り振っており、
+    同じ座席は日をまたいでも常に同じ声で喋る（＝「AIごとに声を持たせる」）。
+    座席ごとの割り当てが無い場合（ゲーム未初期化・声プール未設定など）は、
+    従来通りの単一reference_idにフォールバックする。
+    """
+    seat_voice_ids = st.session_state.get("seat_voice_ids") or {}
+    return seat_voice_ids.get(seat) or get_fish_reference_id()
 
 
 @st.cache_resource(show_spinner=False)
@@ -204,8 +315,9 @@ def call_llm(messages, max_tokens=300, temperature=0.9):
 def call_llm_stream(messages, max_tokens=300, temperature=0.9, on_delta=None):
     """
     call_llm のストリーミング版。OpenRouterからテキストが断片(delta)で
-    届くたびに on_delta(delta) を呼び出す。これにより呼び出し側
-    （SentenceTTSPipeline）は、文が確定した瞬間に即座にTTSへ回せる。
+    届くたびに on_delta(delta) を呼び出す。
+    現在は音声合成が発言単位の一括生成に変わったため直接は使っていないが、
+    ストリーミングが必要になった場合のために残してある。
     通信エラー時は例外を送出せず、call_llm と同じ形式の
     "[通信エラー: ...]" という文字列を返す。
     """
@@ -277,47 +389,40 @@ def call_ai_chat_reply_with_audio(
     tts_api_key=None, tts_reference_id=None, tts_executor=None,
 ):
     """
-    call_ai_chat_reply と同じ検証・リトライ・フォールバックのロジックを
-    保ちながら、テキストがLLMからストリーミングで届くのと"並行して"、
-    文が1つ確定するたびに即座にFish Audio(TTS)へリクエストを投げる
-    「パイプライン生成」を行う。
+    call_ai_chat_reply と同じ検証・リトライ・フォールバックのロジックを保ちつつ、
+    テキストが確定したら、その発言"全体"を1回のFish Audioリクエストで音声化する。
 
-    tts_api_key が無い（音声OFF / キー未設定）場合は、通常の非ストリーミング
-    call_llm にフォールバックし、テキスト表示のテンポには一切影響しない。
+    以前は文単位でストリーミングTTSを行っていたが、reference_id（声のID）を
+    指定していても/していなくても、Fish Audioへのリクエストを文ごとに分けて
+    投げると発話ごとに声の抑揚や質感がわずかに変わって聞こえることがあり、
+    「1文ごとに声が違う」という体感になっていた。1つの発言をまとめて
+    1回のリクエストで音声化することで、その発言中の声は常に一貫する。
+
+    tts_reference_id は呼び出し側（generate_replies_concurrently）で
+    座席ごとに固定の声を渡す想定（get_seat_reference_id参照）。これにより
+    「AIごとに違う声を持つ」が実現される。
+
+    tts_api_key が無い（音声OFF / キー未設定）場合は音声合成自体を行わず、
+    テキスト表示のテンポには一切影響しない。
 
     戻り値: (text, audio_clips)
-      audio_clips は文の順番通りの音声バイト列(bytes|None)のリスト。
-      TTSが無効、または全文に渡って合成が失敗した場合は空リスト。
+      audio_clips は、その発言ぶんの音声バイト列を1件だけ含むリスト
+      （音声OFF、または合成に失敗した場合は空リスト）。
     """
     messages = build_chat_reply_messages(
         role, seat_name, day, chat_log, alive_seats, personality=personality, known_facts=known_facts
     )
     text = ""
-    audio_clips = []
     voice_on = bool(tts_api_key and tts_executor)
 
     for attempt in range(3):
-        pipeline = None
-        if voice_on:
-            pipeline = SentenceTTSPipeline(
-                tts_api_key, tts_executor, model=FISH_MODEL_NAME, reference_id=tts_reference_id
-            )
-            raw = call_llm_stream(messages, max_tokens=220, temperature=0.95, on_delta=pipeline.feed)
-        else:
-            raw = call_llm(messages, max_tokens=220, temperature=0.95)
+        raw = call_llm(messages, max_tokens=220, temperature=0.95)
         candidate = raw.strip()
 
         is_comm_error = candidate.startswith("[通信エラー")
         if candidate and not is_comm_error and looks_japanese(candidate):
             text = candidate
-            if pipeline is not None:
-                pipeline.finish()  # ストリーム終了後に残った断片を最後の1文として処理
-                audio_clips = pipeline.collect_audio()
             break
-
-        if pipeline is not None:
-            # この試行は不採用になるので、TTS結果も丸ごと破棄する
-            pipeline.cancel()
 
         messages = messages + [{
             "role": "user",
@@ -326,14 +431,19 @@ def call_ai_chat_reply_with_audio(
 
     if not text:
         text = random.choice(_FALLBACK_LINES)
-        if voice_on:
-            # フォールバック発言（定型文）は、まとめてバッチ合成する
-            audio_clips = synthesize_text_batch(
-                text, tts_api_key, tts_reference_id, tts_executor, model=FISH_MODEL_NAME
-            )
 
     if len(text) > 150:
         text = text[:148] + "…"
+
+    audio_clips = []
+    if voice_on:
+        # 発言全体を1回のリクエストでまとめて音声化する（文ごとの声のブレを防ぐ）。
+        # 既に専用スレッド(generate_replies_concurrently)の中で呼ばれているため、
+        # ここではさらにtts_executor経由に投げ直さず、素直に同期呼び出しでよい。
+        audio = synthesize_sentence(text, tts_api_key, FISH_MODEL_NAME, tts_reference_id)
+        if audio:
+            audio_clips = [audio]
+
     return text, audio_clips
 
 
@@ -405,37 +515,21 @@ def decide_speakers(candidates, exclude_last=None):
     return random.sample(pool, n)
 
 
-def stream_replies_concurrently(
+def generate_replies_concurrently(
     speakers, day, chat_log, alive_seats, seat_roles,
     seat_personalities=None, seer_seat=None, seer_known_facts=None,
-    tts_api_key=None, tts_reference_id=None, tts_executor=None,
+    tts_api_key=None, seat_reference_ids=None, tts_executor=None,
 ):
     """
     複数のAIの発言を、実際に並行して(同時に)通信・生成する。
-    ジェネレータとして、完了した順に (seat, text, audio_clips) を1件ずつ yield する。
-    audio_clips は文の順番通りの音声バイト列(bytes|None)のリスト（TTS無効/失敗時は []）。
-
-    重要（表示・再生と生成を分離する仕組み）:
-    以前はここで全話者ぶんの生成が完了するまで待ってからリストとして
-    まとめて返しており、呼び出し側は「全員分の生成が終わってから」
-    順番に再生していた。そのため、Aの音声を再生している最中は
-    実質的に何も裏で動いていない状態になっていた。
-
-    ここではジェネレータにして、1人分の生成が完了した"その場"で
-    呼び出し側にyieldする。呼び出し側（render_day_phase）はyieldされた
-    瞬間にテキスト表示・音声再生（time.sleepによるブロッキング待機）を行うが、
-    その待機はこの関数を呼んでいるメインスクリプトのスレッドだけを止めるものであり、
-    まだ完了していない他の話者のFuture（ThreadPoolExecutorの別スレッドで
-    LLM通信・Fish Audio通信を行っている）は、メインスレッドが再生待ちで
-    止まっている間も裏側で並行して進み続ける。
-    つまり「Aの音声を再生している間に、Bはまだ考えたり音声を作ったりしていてよい」
-    が自然に実現される。
-
+    完了した順に (seat, text, audio_clips) のタプルとして返す。
+    audio_clips はその発言ぶんの音声バイト列を1件だけ含むリスト（TTS無効/失敗時は []）。
     seat_personalities: {座席名: 個性辞書} の対応表。各AIの発言トーンに反映する。
     seer_seat / seer_known_facts: 占い師AIが話者に含まれる場合、自身の調査結果を
         会話の判断材料として渡すために使う（占い師AI以外には渡さない）。
-    tts_api_key が渡された場合、各AIのテキスト生成(ストリーミング)と並行して、
-    文単位でFish AudioへのTTSリクエストも裏側で走る（call_ai_chat_reply_with_audio参照）。
+    tts_api_key が渡された場合、各AIのテキスト生成後に、その座席専用の声
+    (seat_reference_ids[seat]、get_seat_reference_id参照)でFish Audioへ
+    1回だけTTSリクエストを投げる（call_ai_chat_reply_with_audio参照）。
 
     重要: ThreadPoolExecutorを `with` 文で使うと、ブロック終了時に
     「まだ終わっていないスレッドの完了を待つ」処理(shutdown(wait=True))が
@@ -447,15 +541,9 @@ def stream_replies_concurrently(
     だけで、以後の画面表示をブロックすることはない。
     """
     seat_personalities = seat_personalities or {}
-    # 重要（「音声が時々出ない」バグの根本原因だった箇所）:
-    # call_ai_chat_reply_with_audio() は「LLM生成(最大3回リトライ)」の後に、
-    # さらに pipeline.collect_audio() で音声取得を待つ（最大 TTS_COLLECT_TIMEOUT_SECONDS 秒）。
-    # 以前はこの外側のタイムアウトが「LLMリトライ分」しか見積もっておらず、
-    # TTS取得が少し長引いただけで、既にテキスト生成に成功していたAIの
-    # ターンごと(音声を含めて)フォールバック発言に差し替えられてしまっていた。
-    # ここでは「LLM生成の絶対上限」+「TTS取得の絶対上限」を両方含めた予算にする。
-    llm_retry_budget = LLM_TIMEOUT_SECONDS * 3 + 10  # リトライ3回分+余裕
-    hard_timeout = llm_retry_budget + TTS_COLLECT_TIMEOUT_SECONDS
+    seat_reference_ids = seat_reference_ids or {}
+    results = []
+    hard_timeout = LLM_TIMEOUT_SECONDS * 3 + 10  # リトライ3回分+余裕を持った絶対上限
     executor = ThreadPoolExecutor(max_workers=max(1, len(speakers)))
     try:
         future_to_seat = {
@@ -463,11 +551,10 @@ def stream_replies_concurrently(
                 call_ai_chat_reply_with_audio, seat_roles[seat], seat, day, chat_log, alive_seats,
                 personality=seat_personalities.get(seat),
                 known_facts=(seer_known_facts if seat == seer_seat else None),
-                tts_api_key=tts_api_key, tts_reference_id=tts_reference_id, tts_executor=tts_executor,
+                tts_api_key=tts_api_key, tts_reference_id=seat_reference_ids.get(seat), tts_executor=tts_executor,
             ): seat
             for seat in speakers
         }
-        done_seats = set()
         try:
             for future in as_completed(future_to_seat, timeout=hard_timeout + 5):
                 seat = future_to_seat[future]
@@ -476,20 +563,21 @@ def stream_replies_concurrently(
                 except Exception as e:
                     text, audio_clips = random.choice(_FALLBACK_LINES), []
                     _record_debug_error(seat, e)
-                done_seats.add(seat)
-                yield seat, text, audio_clips
+                results.append((seat, text, audio_clips))
         except Exception as e:
             # as_completed自体が全体タイムアウトした場合もここで捕捉し、必ず先に進める
             _record_debug_error("全体", e)
 
         # 何らかの理由で結果が得られなかった座席は、必ずフォールバックで埋める
+        done_seats = {seat for seat, _, _ in results}
         for future, seat in future_to_seat.items():
             if seat not in done_seats:
+                results.append((seat, random.choice(_FALLBACK_LINES), []))
                 _record_debug_error(seat, "全体タイムアウトにより打ち切り")
-                yield seat, random.choice(_FALLBACK_LINES), []
     finally:
         # wait=False: 未完了のスレッドを待たずに、ここで即座に関数を抜ける
         executor.shutdown(wait=False, cancel_futures=True)
+    return results
 
 
 def _record_debug_error(seat, error):
@@ -842,15 +930,6 @@ div[data-testid="stFormSubmitButton"] > button {
     font-weight: 700;
     margin: 4px 0 10px;
 }
-
-/* ---- 音声プレイヤー（AIの読み上げ音声）は裏で自動再生するだけにし、
-       操作バーは画面に表示しない ---- */
-div[data-testid="stAudio"] {
-    display: none !important;
-    height: 0 !important;
-    margin: 0 !important;
-    padding: 0 !important;
-}
 </style>
 """
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
@@ -889,6 +968,20 @@ def initialize_game():
     st.session_state.seat_roles = seat_roles
     st.session_state.human_seat = human_seat
     st.session_state.seer_seat = seer_seat
+
+    # 座席ごとに声(reference_id)を1つ固定で割り当てる。
+    # プールが座席数より少ない場合は使い回すが、多い分にはそのぶん多彩になる。
+    # プールが空（FISH_AUDIO_REFERENCE_IDS未設定）の場合は座席ごとの割り当ては
+    # 行わず、get_seat_reference_id() が単一reference_id/デフォルト音声に
+    # フォールバックする。
+    ref_pool = get_fish_reference_ids()
+    seat_voice_ids = {}
+    if ref_pool:
+        shuffled_pool = ref_pool.copy()
+        random.shuffle(shuffled_pool)
+        for i, seat in enumerate(seats):
+            seat_voice_ids[seat] = shuffled_pool[i % len(shuffled_pool)]
+    st.session_state.seat_voice_ids = seat_voice_ids
 
     # 各AI座席にランダムな「個性」を1つずつ割り当てる（役職とは無関係）。
     # プレイヤーには一切表示されないが、発言のトーン・話し方に反映される。
@@ -1069,6 +1162,10 @@ def render_title_screen():
     st.write("")
     st.write("")
     if st.button("▶ ゲームを開始する", type="primary", use_container_width=True):
+        # このクリックに直結させて無音を1回再生しておくことで、後でタイマー経由
+        # （＝クリックを伴わずに）自動再生される最初のAIの発言がブラウザの
+        # 自動再生制限でブロックされる事態を防ぐ（_silent_wav_bytesのコメント参照）。
+        play_audio_hidden(_silent_wav_bytes(), mime="audio/wav")
         initialize_game()
         st.session_state.screen = "game"
         st.rerun()
@@ -1167,9 +1264,82 @@ def get_aizuchi_clip_b64():
     return b64
 
 
+def _silent_wav_bytes(duration_sec=0.15, sample_rate=8000):
+    """
+    無音の極小WAVファイルをその場で生成する（ネットワーク不要・依存ライブラリ不要）。
+
+    用途: 「ゲームを開始する」ボタンのクリック直後に、この無音音声を
+    play_audio_hidden() で1回再生しておく。ブラウザの自動再生制限
+    （音声付きのメディアは、そのページ/オリジンでユーザー操作が一度も無いと
+    自動再生できない）は、多くの場合いったん何か1つでも音声の自動再生に
+    成功すると、それ以降のセッションでは自動再生が許可されるようになる。
+    ここでボタンクリックという明確なユーザー操作に直結させて音声再生を
+    "起動"しておくことで、その後タイマー経由で（＝ユーザー操作を伴わずに）
+    再生される最初のAIの発言が自動再生をブロックされてしまう問題を防ぐ。
+    """
+    buf = io.BytesIO()
+    n_frames = int(duration_sec * sample_rate)
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes(b"\x00\x00" * n_frames)
+    return buf.getvalue()
+
+
+def play_audio_hidden(audio_bytes, mime="audio/mp3"):
+    """
+    st.audio() を使わず、画面上に一切要素を残さない形で音声を自動再生する。
+
+    実装:
+      streamlit.components.v1.html() が生成するiframeには
+      sandbox="... allow-same-origin ..." が付与されているため、
+      iframe内のJavaScriptから window.parent.document
+      （＝Streamlitアプリ本体のページ）を直接操作できる。これを利用して、
+      <audio>要素をiframeの中にではなく、アプリ本体のdocumentに直接追加する。
+
+      こうすることで:
+        1. 音声プレイヤーはStreamlitのUI上のどの場所にも要素として現れない
+           （st.audioをCSSで隠す方式と違い、そもそも表示用の場所を持たない）。
+        2. iframe自体も幅0・高さ0で埋め込まれるため、隙間・枠線なども残らない。
+        3. 再生はアプリ本体（親ページ）そのもののオリジンで行われるため、
+           ブラウザの自動再生ポリシー（そのページで一度でもユーザー操作が
+           あれば自動再生を許可する）の恩恵をそのまま受けられる。
+
+      呼び出すたびに、前回このヘルパーが追加した<audio>要素を確実に
+      削除してから新しい要素を追加するので、隠し要素が際限なく
+      増え続けることはない。
+    """
+    if not audio_bytes:
+        return
+    b64 = base64.b64encode(audio_bytes).decode("ascii")
+    html = f"""
+    <script>
+    (function() {{
+        try {{
+            var doc = window.parent.document;
+            var old = doc.getElementById("uai-hidden-audio");
+            if (old) {{ old.pause(); old.remove(); }}
+            var audio = doc.createElement("audio");
+            audio.id = "uai-hidden-audio";
+            audio.src = "data:{mime};base64,{b64}";
+            audio.autoplay = true;
+            audio.style.display = "none";
+            audio.style.width = "0px";
+            audio.style.height = "0px";
+            doc.body.appendChild(audio);
+        }} catch (e) {{
+            console.error("[UAI] hidden audio playback failed:", e);
+        }}
+    }})();
+    </script>
+    """
+    components.html(html, height=0, width=0)
+
+
 def play_clip_and_wait(clip_bytes, extra_delay=AUDIO_SLEEP_BUFFER_SECONDS):
     """
-    音声クリップを1つ、（CSSで非表示にした）st.audio(..., autoplay=True)で再生し、
+    音声クリップを1つ、画面に表示されない形で再生し、
     その音声の実際の長さ分だけ処理を止めて待つ。
 
     重要（「途中で止まる」バグの根本原因と対策）:
@@ -1189,13 +1359,10 @@ def play_clip_and_wait(clip_bytes, extra_delay=AUDIO_SLEEP_BUFFER_SECONDS):
     副次効果として、「音声が鳴り始めた瞬間にその発言のテキストが表示される」
     という体感の同期も、このタイミング制御によって自然に実現される
     （呼び出し側でテキスト表示の直後にこの関数を呼ぶ設計になっている）。
-
-    バックグラウンドから呼ばれるわけではなくメインスクリプトの流れの中で
-    呼ばれるため、st.audio自体は問題なく使える。
     """
     if not clip_bytes:
         return
-    st.audio(clip_bytes, format="audio/mp3", autoplay=True)
+    play_audio_hidden(clip_bytes, mime="audio/mp3")
     time.sleep(get_mp3_duration_seconds(clip_bytes) + extra_delay)
 
 
@@ -1207,7 +1374,7 @@ def render_manual_replay_button():
     """
     if st.session_state.get("last_audio_bytes"):
         if st.button("🔊 直前の音声を再生する", key="manual_replay_btn"):
-            st.audio(st.session_state.last_audio_bytes, format="audio/mp3", autoplay=True)
+            play_audio_hidden(st.session_state.last_audio_bytes, mime="audio/mp3")
 
 
 def render_client_side_timer(deadline_epoch, total_seconds):
@@ -1317,33 +1484,59 @@ def render_day_phase():
         if entry.get("day") == st.session_state.day:
             render_statement_card(entry["seat"], entry["text"])
 
-    # --- 0) 入力欄は必ず毎回呼び出す（AI生成中でも常に発言できるようにするため） ---
-    # st.chat_input は日本語IME変換中のEnterキー（変換確定）でも送信されてしまうことがあるため、
-    # ここでは st.form(enter_to_submit=False) + st.text_input を使い、
-    # 見た目はほぼ同じ横並びの入力欄のまま、Enterキーでは絶対に送信されないようにしている
-    # （送信は必ず送信ボタンを押した時のみ発生する）。
-    # さらに st.bottom コンテナに入れることで、st.chat_input と同じように
-    # 画面（アプリ本体）の一番下に常に固定表示されるようにしている。
+    # --- 音声入力（任意）：マイクで録音した内容をWhisperで文字起こしし、
+    #     下の発言欄に自動で入力する。送信は今まで通りボタンを押した時だけ
+    #     行われるので、認識結果はここで一度確認・修正してから送れる。
+    #
+    # 発言欄(st.text_input)のkeyに対して事前に st.session_state[key]=... を
+    # セットしておくと、その値がその回のウィジェット生成時の初期値になる
+    # （ウィジェット生成"後"に同じ方法で値を変えることはできないので、
+    #   このブロックは必ず下の st.text_input より前に置く必要がある）。
+    text_input_key = f"chat_input_area_{st.session_state.day}"
+
     user_msg = None
     if not time_up:
         with st.bottom:
-            with st.form(
-                key="chat_form",
-                clear_on_submit=True,
-                enter_to_submit=False,
-                border=False,
-            ):
-                col_input, col_btn = st.columns([6, 1], vertical_alignment="bottom")
-                with col_input:
-                    draft = st.text_input(
-                        "発言を入力",
-                        key=f"chat_input_area_{st.session_state.day}",
-                        max_chars=150,
-                        label_visibility="collapsed",
-                        placeholder="発言を入力（150文字以内）...",
+            # マイクボタンは発言欄と同じ行の左側に置きたいが、
+            # st.form の中では通常のst.button()が使えない（st.form_submit_button
+            # だと、押した瞬間にclear_on_submitで入力中の下書きまで消えてしまう）
+            # ため、フォームの外に置いた列(col_mic)とフォーム自体(col_form)を
+            # 横に並べる形にしている。
+            col_mic, col_form = st.columns([2, 6], vertical_alignment="bottom")
+            with col_mic:
+                raw_bytes, rec_format = record_voice_input()
+
+            if raw_bytes:
+                mime = f"audio/{rec_format or 'wav'}"
+                with st.spinner("文字起こし中..."):
+                    transcribed = transcribe_audio(
+                        raw_bytes, filename=f"voice_input.{rec_format or 'wav'}", content_type=mime
                     )
-                with col_btn:
-                    submitted = st.form_submit_button("送信 ➤", type="primary", use_container_width=True)
+                if transcribed:
+                    st.session_state[text_input_key] = transcribed[:150]
+                else:
+                    st.warning(
+                        "うまく聞き取れませんでした。もう一度録音するか、直接入力してください。"
+                    )
+
+            with col_form:
+                with st.form(
+                    key="chat_form",
+                    clear_on_submit=True,
+                    enter_to_submit=False,
+                    border=False,
+                ):
+                    col_input, col_btn = st.columns([6, 1], vertical_alignment="bottom")
+                    with col_input:
+                        draft = st.text_input(
+                            "発言を入力",
+                            key=text_input_key,
+                            max_chars=150,
+                            label_visibility="collapsed",
+                            placeholder="発言を入力（150文字以内）...",
+                        )
+                    with col_btn:
+                        submitted = st.form_submit_button("送信 ➤", type="primary", use_container_width=True)
         if submitted and draft and draft.strip():
             user_msg = draft
 
@@ -1365,42 +1558,27 @@ def render_day_phase():
         voice_on = st.session_state.get("voice_enabled", True)
         fish_key = get_fish_api_key() if voice_on else ""
         tts_executor = get_tts_executor() if fish_key else None
+        with st.spinner(f"{label} が発言を考え中..."):
+            results = generate_replies_concurrently(
+                speakers, st.session_state.day, st.session_state.chat_log, alive, st.session_state.seat_roles,
+                seat_personalities=st.session_state.get("seat_personalities"),
+                seer_seat=seer_seat,
+                seer_known_facts=seer_known_facts_text() if seer_seat else None,
+                tts_api_key=fish_key or None,
+                seat_reference_ids={s: get_seat_reference_id(s) for s in speakers},
+                tts_executor=tts_executor,
+            )
 
-        # stream_replies_concurrently はジェネレータ。ここで呼び出した時点では
-        # まだ何も実行されず、下のfor文で最初の要素を取りに行った瞬間に
-        # 全話者分のLLM/TTS通信がバックグラウンドスレッドで一斉に始まる。
-        reply_stream = stream_replies_concurrently(
-            speakers, st.session_state.day, st.session_state.chat_log, alive, st.session_state.seat_roles,
-            seat_personalities=st.session_state.get("seat_personalities"),
-            seer_seat=seer_seat,
-            seer_known_facts=seer_known_facts_text() if seer_seat else None,
-            tts_api_key=fish_key or None,
-            tts_reference_id=get_fish_reference_id(),
-            tts_executor=tts_executor,
-        )
-
-        # 発言者1人ずつ「生成が完了ししだい即座にテキストを表示→その音声を再生
-        # →実際の長さぶん待つ」という順で処理する。
-        #
-        # 重要（生成と再生を分離する）: このfor文自体は次の要素を取り出すたびに
-        # ブロックしうるが、それは「まだ完了していない話者の生成を待つ」だけであり、
-        # 一度でも生成が始まった話者のLLM通信・Fish Audio通信は、下のplay_clip_and_wait()
-        # がその場でtime.sleepしている間も、別スレッド(ThreadPoolExecutor)で
-        # 裏側で並行して進み続けている。つまり「Aの音声を再生している間、
-        # Bはまだ考えたり音声を作ったりしていてよい」が成立する。
-        # 表示・再生自体は必ず直列（前の音声が鳴り終わってから次を流す）を維持する。
+        # 発言者1人ずつ「テキストを確定・表示 → その音声を再生 → 実際の長さぶん待つ」
+        # の順で処理する。これにより、次の人の発言（と音声）に進むのは必ず
+        # 前の人の音声が鳴り終わったあとになり、「音声が出た瞬間にその発言の
+        # 文字が表示される」体感になる。
+        # （このループはrerunを挟まず、この1回のスクリプト実行の中で完結する。
+        #   自動更新(st_autorefresh)が再生の途中に割り込むことはない。詳細は
+        #   play_clip_and_wait() のコメントを参照。）
         replay_clips = []
         any_played = False
-        thinking_slot = st.empty()
-        reply_iter = iter(reply_stream)
-        while True:
-            thinking_slot.markdown(f"💭 {label} が発言を考え中...")
-            try:
-                seat, text, audio_clips = next(reply_iter)
-            except StopIteration:
-                break
-            thinking_slot.empty()  # 表示する直前まではその話者の存在を隠す
-
+        for seat, text, audio_clips in results:
             valid_clips = [c for c in audio_clips if c]
             if fish_key and not valid_clips:
                 # 音声ONでテキストは生成できたのに音声が1つも得られなかった場合は、
@@ -1424,11 +1602,8 @@ def render_day_phase():
                 replay_clips.append(clip)
                 any_played = True
 
-        thinking_slot.empty()
-
         if replay_clips:
             st.session_state.last_audio_bytes = concat_mp3_clips(replay_clips)  # 手動リプレイ用に保持
-
 
         st.session_state.pending_speakers = []
         st.session_state.next_ai_speak_time = time.time() + random.uniform(
