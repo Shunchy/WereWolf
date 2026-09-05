@@ -21,6 +21,7 @@ Streamlitには一切依存しない独立モジュール。app.py側から
 import io
 import re
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 import requests
@@ -83,11 +84,29 @@ def split_into_sentences(text):
     return sentences
 
 
+# 一時的な失敗（タイムアウト・429・5xx）とみなして自動リトライする最大回数。
+# 無料枠のFish Audioは瞬間的な混雑で失敗することがあるため、1回失敗しただけで
+# その文の音声を丸ごと諦めない（＝「時々音声が出ない」の主因の1つ）。
+_TRANSIENT_RETRY_COUNT = 2
+_TRANSIENT_RETRY_BACKOFF_SECONDS = 0.8
+
+
+def _is_transient_http_error(e):
+    """再試行する価値のある一時的なHTTPエラーか判定する（429=レート制限, 5xx=サーバ側一時障害）。"""
+    resp = getattr(e, "response", None)
+    status = getattr(resp, "status_code", None)
+    return status == 429 or (status is not None and 500 <= status < 600)
+
+
 def synthesize_sentence(text, api_key, model=DEFAULT_MODEL, reference_id=None, timeout=REQUEST_TIMEOUT):
     """
     1文をFish Audio API (POST /v1/tts) に送信し、mp3の音声バイト列を返す。
     通信に失敗した場合は例外を投げず、Noneを返す
     （呼び出し側はその文の音声だけを諦めて、テキスト表示は止めない）。
+
+    タイムアウト/429/5xxなど「一時的」と思われる失敗は、短い待機を挟んで
+    最大 _TRANSIENT_RETRY_COUNT 回まで自動的に再試行する。4xx（認証エラーなど、
+    リトライしても直らない失敗）は即座に諦める。
 
     バックグラウンドスレッドから呼ばれるためStreamlitのAPIは使えない。
     失敗の詳細は（アプリのログに残るよう）標準エラー出力に書き出しておく。
@@ -107,24 +126,39 @@ def synthesize_sentence(text, api_key, model=DEFAULT_MODEL, reference_id=None, t
     payload = {"text": text, "format": "mp3"}
     if reference_id:
         payload["reference_id"] = reference_id
-    try:
-        resp = requests.post(FISH_TTS_URL, headers=headers, json=payload, timeout=timeout)
-        resp.raise_for_status()
-        if not resp.content:
-            print("[tts] Fish Audioから空の音声データが返されました。", file=sys.stderr)
-            return None
-        return resp.content
-    except requests.exceptions.HTTPError as e:
-        body = ""
+
+    last_error_summary = ""
+    for attempt in range(_TRANSIENT_RETRY_COUNT + 1):
         try:
-            body = e.response.text[:300]
-        except Exception:
-            pass
-        print(f"[tts] Fish Audio APIエラー: {e} / response: {body}", file=sys.stderr)
-        return None
-    except Exception as e:
-        print(f"[tts] Fish Audio 通信エラー: {e}", file=sys.stderr)
-        return None
+            resp = requests.post(FISH_TTS_URL, headers=headers, json=payload, timeout=timeout)
+            resp.raise_for_status()
+            if not resp.content:
+                last_error_summary = "空の音声データ"
+                print("[tts] Fish Audioから空の音声データが返されました。", file=sys.stderr)
+            else:
+                return resp.content
+        except requests.exceptions.HTTPError as e:
+            body = ""
+            try:
+                body = e.response.text[:300]
+            except Exception:
+                pass
+            last_error_summary = f"{e} / response: {body}"
+            print(f"[tts] Fish Audio APIエラー(試行{attempt + 1}): {last_error_summary}", file=sys.stderr)
+            if not _is_transient_http_error(e):
+                return None  # 4xx等は再試行しても無駄なので即座に諦める
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+            last_error_summary = str(e)
+            print(f"[tts] Fish Audio 通信タイムアウト/接続エラー(試行{attempt + 1}): {e}", file=sys.stderr)
+        except Exception as e:
+            print(f"[tts] Fish Audio 通信エラー: {e}", file=sys.stderr)
+            return None
+
+        if attempt < _TRANSIENT_RETRY_COUNT:
+            time.sleep(_TRANSIENT_RETRY_BACKOFF_SECONDS * (attempt + 1))
+
+    print(f"[tts] Fish Audio: {_TRANSIENT_RETRY_COUNT + 1}回試行しましたが失敗しました ({last_error_summary})", file=sys.stderr)
+    return None
 
 
 def concat_mp3_clips(clips):
@@ -155,10 +189,13 @@ def synthesize_text_batch(text, api_key, reference_id, executor, model=DEFAULT_M
         executor.submit(synthesize_sentence, s, api_key, model, reference_id)
         for s in sentences
     ]
+    # collect_audio()と同様、timeoutは「全体の予算」として扱う（文の数だけ掛け算しない）。
     results = []
+    deadline = time.monotonic() + timeout
     for f in futures:
+        remaining = max(0.0, deadline - time.monotonic())
         try:
-            results.append(f.result(timeout=timeout))
+            results.append(f.result(timeout=remaining))
         except Exception:
             results.append(None)
     return results
@@ -225,11 +262,21 @@ class SentenceTTSPipeline:
         文の順番通りに音声バイト列(または失敗時はNone)のリストを返す。
         ストリーミング中にバックグラウンドで既にかなり進行しているため、
         ここで実際に待つのは基本的に最後の1〜2文分だけで済む。
+
+        重要: `timeout` は「文1つあたり」ではなく「このメソッド全体」の予算として扱う。
+        以前は f.result(timeout=timeout) を文の数だけ直列に呼んでいたため、
+        文が多いセリフだと最悪 timeout×文数 まで待ってしまい、呼び出し元
+        （generate_replies_concurrently）が設定している全体タイムアウトを
+        簡単に超えてしまっていた（＝「音声が時々出ない」の主因）。
+        ここでは全体の締切(deadline)を1つ決め、各文の待ち時間はその残り時間
+        でしか待たないようにする。
         """
         results = []
+        deadline = time.monotonic() + timeout
         for f in self._futures:
+            remaining = max(0.0, deadline - time.monotonic())
             try:
-                results.append(f.result(timeout=timeout))
+                results.append(f.result(timeout=remaining))
             except Exception:
                 results.append(None)
         return results
