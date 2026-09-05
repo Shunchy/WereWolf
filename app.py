@@ -176,8 +176,9 @@ def transcribe_audio(audio_bytes: bytes, filename: str = "voice_input.wav", cont
 
 def record_voice_input():
     """
-    streamlit-mic-recorderの「🎤 音声で入力」/「⏹ 録音停止」ボタンを描画する。
-    波形表示は無く、ボタンの表記が切り替わるだけのシンプルなUI。
+    streamlit-mic-recorderの「🎤」/「⏹」ボタンを描画する。
+    波形表示は無く、アイコンだけのシンプルなUI（発言欄の左に収まるよう、
+    テキストラベルは付けずアイコンのみにしている）。
 
     just_once=True のため、録音が完了した直後の1回だけ音声データを返し、
     以降のrerunでは（再録音するまで）Noneを返す。これにより、呼び出し側で
@@ -189,8 +190,8 @@ def record_voice_input():
     戻り値: (音声バイト列, フォーマット文字列("wav"など)) または (None, None)。
     """
     kwargs = dict(
-        start_prompt="🎤 音声で入力",
-        stop_prompt="⏹ 録音停止",
+        start_prompt="🎤",
+        stop_prompt="⏹",
         just_once=True,
         use_container_width=True,
         key="voice_mic_recorder",
@@ -942,15 +943,26 @@ div[data-testid="stFormSubmitButton"] > button {
     margin: 4px 0 10px;
 }
 
-/* ---- AIの読み上げ音声プレイヤーを少しコンパクトにする。
-       完全に非表示にする方法はブラウザによって効かないことがあるため、
-       代わりに常に同じ場所（発言入力欄のすぐ上）に、小さく表示する ---- */
+/* ---- AIの読み上げ音声プレイヤーは画面に表示しない（自動再生のみ行う）。
+       再生の仕組み自体はst.audio()のまま（表示/非表示はCSSだけの問題で、
+       再生の安定性には影響しない） ---- */
 div[data-testid="stAudio"] {
-    margin: 0 0 4px 0 !important;
+    display: none !important;
+    height: 0 !important;
+    margin: 0 !important;
+    padding: 0 !important;
 }
-div[data-testid="stAudio"] audio {
-    height: 32px;
-    width: 100%;
+
+/* ---- マイク録音ボタン(streamlit-mic-recorder)の外枠を、発言欄と
+       高さを揃えて1つの入力バーのように見せる ---- */
+div.st-key-mic_recorder_wrap {
+    display: flex;
+    align-items: center;
+    height: 40px;
+}
+div.st-key-mic_recorder_wrap iframe {
+    height: 40px !important;
+    width: 100% !important;
 }
 </style>
 """
@@ -1563,9 +1575,15 @@ def render_day_phase():
             # だと、押した瞬間にclear_on_submitで入力中の下書きまで消えてしまう）
             # ため、フォームの外に置いた列(col_mic)とフォーム自体(col_form)を
             # 横に並べる形にしている。
-            col_mic, col_form = st.columns([2, 6], vertical_alignment="bottom")
+            # st.container(key=...) で囲むことで、CSS側から
+            # ".st-key-mic_recorder_wrap" として高さを発言欄に揃えられるように
+            # している（streamlit-mic-recorderは別iframeの独自UIのため、
+            # 中身のボタン自体の見た目までは変えられないが、外枠のサイズは
+            # 揃えられる）。
+            col_mic, col_form = st.columns([1, 7], vertical_alignment="bottom")
             with col_mic:
-                raw_bytes, rec_format = record_voice_input()
+                with st.container(key="mic_recorder_wrap"):
+                    raw_bytes, rec_format = record_voice_input()
 
             if raw_bytes:
                 mime = f"audio/{rec_format or 'wav'}"
@@ -1587,7 +1605,7 @@ def render_day_phase():
                     enter_to_submit=False,
                     border=False,
                 ):
-                    col_input, col_btn = st.columns([6, 1], vertical_alignment="bottom")
+                    col_input, col_btn = st.columns([5, 1], vertical_alignment="bottom")
                     with col_input:
                         draft = st.text_input(
                             "発言を入力",
@@ -1597,7 +1615,7 @@ def render_day_phase():
                             placeholder="発言を入力（150文字以内）...",
                         )
                     with col_btn:
-                        submitted = st.form_submit_button("送信 ➤", type="primary", use_container_width=True)
+                        submitted = st.form_submit_button("送信", type="primary", use_container_width=True)
         if submitted and draft and draft.strip():
             user_msg = draft
 
