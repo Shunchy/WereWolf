@@ -1,4 +1,6 @@
-streamlit>=1.33.0
+streamlit>=1.38.0
 openai>=1.30.0
 python-dotenv>=1.0.1
 streamlit-autorefresh>=1.0.1
+mutagen>=1.47.0
+streamlit-mic-recorder>=0.0.8
