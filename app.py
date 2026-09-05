@@ -930,6 +930,17 @@ div[data-testid="stFormSubmitButton"] > button {
     font-weight: 700;
     margin: 4px 0 10px;
 }
+
+/* ---- AIの読み上げ音声プレイヤーを少しコンパクトにする。
+       完全に非表示にする方法はブラウザによって効かないことがあるため、
+       代わりに常に同じ場所（発言入力欄のすぐ上）に、小さく表示する ---- */
+div[data-testid="stAudio"] {
+    margin: 0 0 4px 0 !important;
+}
+div[data-testid="stAudio"] audio {
+    height: 32px;
+    width: 100%;
+}
 </style>
 """
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
@@ -1160,12 +1171,13 @@ def render_title_screen():
     )
 
     st.write("")
+    render_mobile_audio_unlock_button()
     st.write("")
     if st.button("▶ ゲームを開始する", type="primary", use_container_width=True):
         # このクリックに直結させて無音を1回再生しておくことで、後でタイマー経由
         # （＝クリックを伴わずに）自動再生される最初のAIの発言がブラウザの
         # 自動再生制限でブロックされる事態を防ぐ（_silent_wav_bytesのコメント参照）。
-        play_audio_hidden(_silent_wav_bytes(), mime="audio/wav")
+        st.audio(_silent_wav_bytes(), format="audio/wav", autoplay=True)
         initialize_game()
         st.session_state.screen = "game"
         st.rerun()
@@ -1264,12 +1276,72 @@ def get_aizuchi_clip_b64():
     return b64
 
 
+def render_mobile_audio_unlock_button():
+    """
+    PCでは動くのにスマホ（特にiOS Safari）では自動再生されない問題への対策。
+
+    デスクトップのブラウザ（Chrome等）は「そのページで過去に一度でも
+    ユーザー操作があれば、以降は自動再生を許可する」という比較的緩い基準で
+    判定する。一方iOS Safariは基本的に「ユーザー操作イベントの呼び出し
+    スタックの"その場"でaudio.play()が呼ばれた場合だけ」再生を許可する、
+    という厳しい基準で判定する。
+
+    st.button()のクリックは、サーバーへ送信→サーバーが新しいUIを返す、
+    という一往復（非同期）を挟んでしまうため、その後でst.audio(autoplay=True)
+    を出しても、iOS Safariからは「ユーザー操作の"その場"ではない」と
+    判定されて自動再生がブロックされることがある。これがPCでは動くのに
+    スマホでは動かない主な原因と考えられる。
+
+    対策として、ここではcomponents.v1.html()で"本物のHTMLボタン"を描画し、
+    そのonclickハンドラの中で（Streamlitのサーバー往復を挟まずに）
+    "その場"で無音を1回再生する。さらに、その<audio>要素はiframeの中では
+    なく window.parent.document（アプリ本体のページ）に追加することで、
+    音声再生機構の"アンロック"状態が正しくアプリ本体のページに対して
+    記録されるようにしている。これにより、以降サーバー側から出される
+    st.audio(autoplay=True)（AIの発言など）も自動再生されやすくなる。
+
+    ※ iOS Safariの自動再生制限は非常に厳しく、機種・バージョン・設定に
+    よってはこれでも100%保証はできない。最終的な保険として、
+    render_manual_replay_button()（明確なタップなので確実に再生できる）
+    を残してある。
+    """
+    silent_b64 = base64.b64encode(_silent_wav_bytes()).decode("ascii")
+    html = f"""
+    <button id="uai-unlock-btn" type="button" style="
+        background:#1f6f5c; color:#fff; border:none; border-radius:8px;
+        padding:10px 16px; font-size:14px; cursor:pointer; width:100%;
+        font-family:inherit;
+    ">🔊 音声を有効にする（スマホの方は必ずタップしてください）</button>
+    <script>
+    document.getElementById("uai-unlock-btn").addEventListener("click", function() {{
+        var btn = this;
+        try {{
+            var doc = window.parent.document;
+            var audio = doc.createElement("audio");
+            audio.src = "data:audio/wav;base64,{silent_b64}";
+            doc.body.appendChild(audio);
+            var p = audio.play();
+            if (p && p.catch) {{
+                p.catch(function(e) {{ console.error("[UAI] unlock play failed:", e); }});
+            }}
+        }} catch (e) {{
+            console.error("[UAI] unlock error:", e);
+        }}
+        btn.innerText = "✅ 音声が有効になりました";
+        btn.disabled = true;
+        btn.style.opacity = "0.6";
+    }});
+    </script>
+    """
+    components.html(html, height=50)
+
+
 def _silent_wav_bytes(duration_sec=0.15, sample_rate=8000):
     """
     無音の極小WAVファイルをその場で生成する（ネットワーク不要・依存ライブラリ不要）。
 
     用途: 「ゲームを開始する」ボタンのクリック直後に、この無音音声を
-    play_audio_hidden() で1回再生しておく。ブラウザの自動再生制限
+    st.audio(..., autoplay=True) で1回再生しておく。ブラウザの自動再生制限
     （音声付きのメディアは、そのページ/オリジンでユーザー操作が一度も無いと
     自動再生できない）は、多くの場合いったん何か1つでも音声の自動再生に
     成功すると、それ以降のセッションでは自動再生が許可されるようになる。
@@ -1287,62 +1359,29 @@ def _silent_wav_bytes(duration_sec=0.15, sample_rate=8000):
     return buf.getvalue()
 
 
-def play_audio_hidden(audio_bytes, mime="audio/mp3"):
+def play_clip_and_wait(clip_bytes, dock=None, extra_delay=AUDIO_SLEEP_BUFFER_SECONDS):
     """
-    st.audio() を使わず、画面上に一切要素を残さない形で音声を自動再生する。
+    音声クリップを1つ再生し、その音声の実際の長さ分だけ処理を止めて待つ。
 
-    実装:
-      streamlit.components.v1.html() が生成するiframeには
-      sandbox="... allow-same-origin ..." が付与されているため、
-      iframe内のJavaScriptから window.parent.document
-      （＝Streamlitアプリ本体のページ）を直接操作できる。これを利用して、
-      <audio>要素をiframeの中にではなく、アプリ本体のdocumentに直接追加する。
+    重要: 以前は components.v1.html() のiframe内から window.parent.document へ
+    <audio>要素を注入する方式（完全に見た目上の痕跡を残さない代わりに、
+    毎回新しいiframeを生成する）を使っていたが、これが「音声がうまく流れる
+    時と流れない時がある」の主因だったと判断し、st.audio()を使う元の方式に
+    戻した。iframe方式には主に2つの弱点があった:
+      1. componentsのiframeはStreamlit側のサンドボックス設定次第で
+         window.parent.documentへのアクセスや自動再生の許可(ユーザー操作
+         済み判定の伝播)が保証されない場合があり、ブラウザや
+         タイミングによって自動再生が黙って失敗することがある。
+      2. 発言のたびに新しいiframeを都度生成するため、前のiframeの
+         読み込み・実行タイミングと重なると、同じid("uai-hidden-audio")を
+         取り合う形になり、再生開始前に前の要素を消してしまう、
+         といった競合が起こり得る。
+    st.audio()はStreamlitのメイン画面と同じフレーム内のネイティブ要素なので、
+    これらの問題が起こらない。表示上は、コントロールバーをできるだけ
+    目立たなくするため、常に同じ場所（発言入力欄のすぐ上、dock引数で渡す
+    プレースホルダー）に小さく表示する方式にしている。
 
-      こうすることで:
-        1. 音声プレイヤーはStreamlitのUI上のどの場所にも要素として現れない
-           （st.audioをCSSで隠す方式と違い、そもそも表示用の場所を持たない）。
-        2. iframe自体も幅0・高さ0で埋め込まれるため、隙間・枠線なども残らない。
-        3. 再生はアプリ本体（親ページ）そのもののオリジンで行われるため、
-           ブラウザの自動再生ポリシー（そのページで一度でもユーザー操作が
-           あれば自動再生を許可する）の恩恵をそのまま受けられる。
-
-      呼び出すたびに、前回このヘルパーが追加した<audio>要素を確実に
-      削除してから新しい要素を追加するので、隠し要素が際限なく
-      増え続けることはない。
-    """
-    if not audio_bytes:
-        return
-    b64 = base64.b64encode(audio_bytes).decode("ascii")
-    html = f"""
-    <script>
-    (function() {{
-        try {{
-            var doc = window.parent.document;
-            var old = doc.getElementById("uai-hidden-audio");
-            if (old) {{ old.pause(); old.remove(); }}
-            var audio = doc.createElement("audio");
-            audio.id = "uai-hidden-audio";
-            audio.src = "data:{mime};base64,{b64}";
-            audio.autoplay = true;
-            audio.style.display = "none";
-            audio.style.width = "0px";
-            audio.style.height = "0px";
-            doc.body.appendChild(audio);
-        }} catch (e) {{
-            console.error("[UAI] hidden audio playback failed:", e);
-        }}
-    }})();
-    </script>
-    """
-    components.html(html, height=0, width=0)
-
-
-def play_clip_and_wait(clip_bytes, extra_delay=AUDIO_SLEEP_BUFFER_SECONDS):
-    """
-    音声クリップを1つ、画面に表示されない形で再生し、
-    その音声の実際の長さ分だけ処理を止めて待つ。
-
-    重要（「途中で止まる」バグの根本原因と対策）:
+    重要2（「途中で止まる」バグの根本原因と対策。こちらは既に解決済み）:
     以前は「テキストを全部chat_logに入れて音声だけキューに積み、次のrerunで
     まとめて再生する」という2段階の作りだった。しかしStreamlitの
     st_autorefresh（待機中の4秒ごとの自動更新）は、まさにその「音声再生中の
@@ -1362,19 +1401,20 @@ def play_clip_and_wait(clip_bytes, extra_delay=AUDIO_SLEEP_BUFFER_SECONDS):
     """
     if not clip_bytes:
         return
-    play_audio_hidden(clip_bytes, mime="audio/mp3")
+    target = dock if dock is not None else st
+    target.audio(clip_bytes, format="audio/mp3", autoplay=True)
     time.sleep(get_mp3_duration_seconds(clip_bytes) + extra_delay)
 
 
 def render_manual_replay_button():
     """
-    ブラウザの自動再生ポリシーで音声がブロックされた場合のための保険。
-    ボタンクリックは確実な「ユーザー操作」とみなされるため、
-    ここからの再生はほぼ確実にブロックされない。
+    Fish Audioの音声合成そのものが失敗した場合や、何らかの事情で自動再生が
+    ブロックされた場合のための保険。ボタンクリックは確実な「ユーザー操作」
+    とみなされるため、ここからの再生はほぼ確実にブロックされない。
     """
     if st.session_state.get("last_audio_bytes"):
         if st.button("🔊 直前の音声を再生する", key="manual_replay_btn"):
-            play_audio_hidden(st.session_state.last_audio_bytes, mime="audio/mp3")
+            st.audio(st.session_state.last_audio_bytes, format="audio/mp3", autoplay=True)
 
 
 def render_client_side_timer(deadline_epoch, total_seconds):
@@ -1484,6 +1524,16 @@ def render_day_phase():
         if entry.get("day") == st.session_state.day:
             render_statement_card(entry["seat"], entry["text"])
 
+    # --- AIの音声を再生するための固定枠 ---
+    # 発言入力欄と同じ「画面下部に常に固定される」コンテナ(st.bottom)の中に、
+    # 入力欄より先に空のプレースホルダーを置いておく。こうすると、実際に
+    # 音声を再生するタイミング（このあとのstep 2、コード上はずっと後ろ）で
+    # このプレースホルダーに書き込んでも、見た目の位置は「入力欄のすぐ上」に
+    # 固定されたままになる（Streamlitのプレースホルダーは、生成した時点の
+    # 位置を保持したまま、後から中身だけ差し替えられるため）。
+    with st.bottom:
+        audio_dock = st.empty()
+
     # --- 音声入力（任意）：マイクで録音した内容をWhisperで文字起こしし、
     #     下の発言欄に自動で入力する。送信は今まで通りボタンを押した時だけ
     #     行われるので、認識結果はここで一度確認・修正してから送れる。
@@ -1589,7 +1639,7 @@ def render_day_phase():
                 aizuchi_b64 = get_aizuchi_clip_b64()
                 if aizuchi_b64:
                     aizuchi_bytes = base64.b64decode(aizuchi_b64)
-                    play_clip_and_wait(aizuchi_bytes)
+                    play_clip_and_wait(aizuchi_bytes, dock=audio_dock)
                     replay_clips.append(aizuchi_bytes)
 
             # 発言のテキストは、その音声が再生され始める「今」確定・表示する
@@ -1598,7 +1648,7 @@ def render_day_phase():
             render_statement_card(seat, text)
 
             for clip in valid_clips:
-                play_clip_and_wait(clip)
+                play_clip_and_wait(clip, dock=audio_dock)
                 replay_clips.append(clip)
                 any_played = True
 
