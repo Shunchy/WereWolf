@@ -1893,6 +1893,62 @@ def render_mobile_audio_unlock_button():
     components.html(html, height=50)
 
 
+def inject_global_audio_unlock_listener():
+    """
+    「専用の“音声を有効にする”ボタンを押し忘れると、その回だけ音声が
+    鳴らない」という抜け漏れ対策。
+
+    render_mobile_audio_unlock_button() は、ユーザーが明示的にそのボタンを
+    タップした場合にしか働かない。もしユーザーが（存在に気付かず、あるいは
+    急いでいて）それを押さずに、いきなり「▶ ゲームを開始する」などを
+    タップした場合、iOS Safariのアンロックが行われないまま進んでしまい、
+    「たまに音声が鳴らない」の原因になりうる。
+
+    この関数は、アプリ本体のページ(window.parent.document)に対して、
+    click / touchend を1回だけ捕捉するイベントリスナーを（まだ付けて
+    いなければ）1つだけ仕込む。ページ上の"どこであれ最初にタップした瞬間"
+    に、その場でこっそり無音を再生してアンロックしてしまうため、専用の
+    ボタンを意識的に押さなくても、最初のどんな操作（ゲーム開始ボタンや
+    発言送信ボタンなど）でも自動的にアンロックされるようになる。
+
+    doc上にフラグを立てて多重登録を防いでいるので、rerunのたびにこの
+    関数が呼ばれても（＝新しいiframeが作られても）実際にリスナーが
+    重複して積み重なることはない。
+    """
+    silent_b64 = base64.b64encode(_silent_wav_bytes()).decode("ascii")
+    html = f"""
+    <script>
+    (function() {{
+        try {{
+            var doc = window.parent.document;
+            if (doc.__uaiAudioUnlockAttached) return;
+            doc.__uaiAudioUnlockAttached = true;
+            function unlock() {{
+                if (doc.__uaiAudioUnlocked) return;
+                doc.__uaiAudioUnlocked = true;
+                try {{
+                    var audio = doc.createElement("audio");
+                    audio.src = "data:audio/wav;base64,{silent_b64}";
+                    doc.body.appendChild(audio);
+                    var p = audio.play();
+                    if (p && p.catch) {{
+                        p.catch(function(e) {{ console.error("[UAI] auto-unlock play failed:", e); }});
+                    }}
+                }} catch (e) {{
+                    console.error("[UAI] auto-unlock error:", e);
+                }}
+            }}
+            doc.addEventListener("touchend", unlock, {{capture: true, passive: true}});
+            doc.addEventListener("click", unlock, {{capture: true}});
+        }} catch (e) {{
+            console.error("[UAI] auto-unlock setup error:", e);
+        }}
+    }})();
+    </script>
+    """
+    components.html(html, height=0, width=0)
+
+
 def _silent_wav_bytes(duration_sec=0.15, sample_rate=8000):
     """
     無音の極小WAVファイルをその場で生成する（ネットワーク不要・依存ライブラリ不要）。
@@ -2541,6 +2597,8 @@ def render_result():
 # メイン
 # ======================================================================
 def main():
+    inject_global_audio_unlock_listener()
+
     if st.session_state.screen == "title":
         render_title_screen()
         return
