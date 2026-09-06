@@ -145,6 +145,32 @@ def get_stt_model_name() -> str:
     return name or DEFAULT_STT_MODEL_NAME
 
 
+def _sniff_audio_format(data: bytes) -> str:
+    """
+    音声バイト列の先頭バイト（マジックナンバー）から実際のフォーマットを判定する。
+
+    「音声入力のバグ」の一因として、streamlit-mic-recorderにformat="wav"を
+    指定しても、インストールされているバージョンによっては変換が効かず、
+    ブラウザが実際に録音した形式（多くの場合webm/opus）のバイト列が
+    そのまま返ってくることがある。それにもかかわらず呼び出し側が
+    「wavのはず」と信じてOpenRouterに送ってしまうと、実体と申告形式が
+    食い違い、サーバー側でのデコードに失敗して毎回文字起こしが失敗する。
+    これを避けるため、ライブラリの自己申告(format)は参考程度にし、
+    実際のバイト列を見て判定した結果を優先して使う。
+    """
+    if not data:
+        return "wav"
+    if data[:4] == b"RIFF":
+        return "wav"
+    if data[:4] == b"\x1a\x45\xdf\xa3":
+        return "webm"
+    if data[:4] == b"OggS":
+        return "ogg"
+    if data[:3] == b"ID3" or (len(data) > 1 and data[0] == 0xFF and (data[1] & 0xE0) == 0xE0):
+        return "mp3"
+    return "wav"
+
+
 def transcribe_audio(audio_bytes: bytes, fmt: str = "wav") -> str:
     """
     録音した音声バイト列を、OpenRouterの音声文字起こしエンドポイント
@@ -161,17 +187,21 @@ def transcribe_audio(audio_bytes: bytes, fmt: str = "wav") -> str:
     JSONボディのinput_audioフィールドに乗せる」方式のため、ここでは
     OpenAI SDKを経由せず、requestsで直接そのJSON形式のリクエストを送る。
 
-    fmt: 録音側（streamlit-mic-recorder）が実際に出力した形式
-    （"wav"または"webm"）。input_audio.formatフィールドにそのまま渡す。
+    fmt はあくまで参考値（呼び出し側が録音ライブラリから伝えられた形式）。
+    実際に送信するformatは、バイト列そのものを_sniff_audio_format()で
+    判定した結果を優先する（上記の「申告と実体の食い違い」対策）。
 
-    失敗した場合は空文字列を返す（呼び出し側で「うまく聞き取れませんでした」
-    という案内を出し、手入力へフォールバックする想定）。
+    失敗した場合は空文字列を返す。呼び出し側で「うまく聞き取れませんでした」
+    という案内を出す想定だが、原因を追えるように、実際のエラー内容は
+    debug_errors（画面下部「通信の状態」）に記録している。
     """
     if not audio_bytes:
         return ""
     api_key = get_api_key()
     if not api_key:
         return ""
+    detected_fmt = _sniff_audio_format(audio_bytes)
+    send_fmt = detected_fmt or fmt or "wav"
     try:
         b64_audio = base64.b64encode(audio_bytes).decode("ascii")
         resp = requests.post(
@@ -184,16 +214,25 @@ def transcribe_audio(audio_bytes: bytes, fmt: str = "wav") -> str:
             },
             json={
                 "model": get_stt_model_name(),
-                "input_audio": {"data": b64_audio, "format": fmt or "wav"},
+                "input_audio": {"data": b64_audio, "format": send_fmt},
                 "language": "ja",
             },
-            timeout=LLM_TIMEOUT_SECONDS,
+            timeout=30,  # 文字起こしは通常のLLM応答より時間がかかることがあるため長めに取る
         )
-        resp.raise_for_status()
+        if not resp.ok:
+            body = resp.text[:400]
+            _record_debug_error(
+                "音声入力の文字起こし",
+                f"HTTP {resp.status_code} (申告形式={fmt}, 判定形式={detected_fmt}) / {body}",
+            )
+            return ""
         data = resp.json()
-        return (data.get("text") or "").strip()
+        text = (data.get("text") or "").strip()
+        if not text:
+            _record_debug_error("音声入力の文字起こし", f"空の書き起こし結果が返りました（判定形式={detected_fmt}）")
+        return text
     except Exception as e:
-        _record_debug_error("音声入力の文字起こし", e)
+        _record_debug_error("音声入力の文字起こし", f"{e}（申告形式={fmt}, 判定形式={detected_fmt}）")
         return ""
 
 
@@ -1397,7 +1436,7 @@ if "aizuchi_cache" not in st.session_state:
 
 def render_player_panel():
     """
-    「プレイヤー一覧」「音声再生キュー」「ゲームステータス」パネル。
+    「プレイヤー一覧」「音声再生キュー」パネル。
 
     デザイン参考画像では画面右側の専用カラムに配置されているが、それを
     実現するにはチャット描画・発言処理ロジック全体を1つの列(with句)の中に
@@ -1469,48 +1508,6 @@ def render_player_panel():
         st.markdown(items_html, unsafe_allow_html=True)
         st.markdown('<div style="font-size:10px; color:#5a6272; margin-top:4px;">※ 直近の再生履歴です</div>', unsafe_allow_html=True)
         st.markdown('</div>', unsafe_allow_html=True)
-
-    # ---- ゲームステータス ----
-    day = st.session_state.get("day", 1)
-    today_msgs = [
-        e for e in st.session_state.get("chat_log", [])
-        if e.get("day") == day and e.get("seat") != "SYSTEM"
-    ]
-    total_msgs = len(today_msgs)
-    your_msgs = len([e for e in today_msgs if e.get("seat") == human_seat])
-    share_pct = round(your_msgs / total_msgs * 100) if total_msgs else 0
-    elapsed_label = "--:--"
-    if st.session_state.get("day_phase_start") and st.session_state.get("phase") == "day":
-        elapsed = int(max(0, min(DAY_PHASE_SECONDS, time.time() - st.session_state.day_phase_start)))
-        elapsed_label = f"{elapsed // 60:02d}:{elapsed % 60:02d}"
-
-    st.markdown('<div class="player-panel-card">', unsafe_allow_html=True)
-    st.markdown('<div class="player-panel-title">◈ ゲームステータス</div>', unsafe_allow_html=True)
-    st.markdown(
-        f"""
-        <div class="status-grid">
-            <div class="status-grid-item">
-                <div class="status-grid-label">DAY</div>
-                <div class="status-grid-value">{day}</div>
-            </div>
-            <div class="status-grid-item">
-                <div class="status-grid-label">経過時間</div>
-                <div class="status-grid-value">{elapsed_label}</div>
-            </div>
-            <div class="status-grid-item">
-                <div class="status-grid-label">本日の発言数</div>
-                <div class="status-grid-value">{total_msgs}</div>
-            </div>
-            <div class="status-grid-item">
-                <div class="status-grid-label">あなたの発言シェア</div>
-                <div class="status-grid-value">{share_pct}%</div>
-                <div class="influence-track"><div class="influence-fill" style="width:{share_pct}%;"></div></div>
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    st.markdown('</div>', unsafe_allow_html=True)
 
 
 def render_voice_sidebar():
@@ -1868,7 +1865,7 @@ def render_mobile_audio_unlock_button():
         background:#1f6f5c; color:#fff; border:none; border-radius:8px;
         padding:10px 16px; font-size:14px; cursor:pointer; width:100%;
         font-family:inherit;
-    ">🔊 音声を有効にする</button>
+    ">🔊 音声を有効にする（スマホの方は必ずタップしてください）</button>
     <script>
     document.getElementById("uai-unlock-btn").addEventListener("click", function() {{
         var btn = this;
@@ -2213,9 +2210,27 @@ def render_day_phase():
                 if transcribed:
                     st.session_state[text_input_key] = transcribed[:150]
                 else:
+                    last_error = st.session_state.get("debug_errors", [])[-1:] or ["詳細不明"]
                     st.warning(
-                        "うまく聞き取れませんでした。もう一度録音するか、直接入力してください。"
+                        "うまく聞き取れませんでした。もう一度録音するか、直接入力してください。\n\n"
+                        f"詳細: {last_error[0]}"
                     )
+
+            # --- 特定のAIに話しかけたい時のためのクイック指名ボタン ---
+            # 押すと発言欄の先頭に「@AI-0X 」を挿入する（既存の下書きは消さない）。
+            # st.button()はst.formの外にあるので、押してもclear_on_submitで
+            # 下書きが消えることはない。ウィジェット生成前にsession_stateへ
+            # 値をセットする必要があるため、st.text_input()より前に置く。
+            mention_targets = [s for s in alive if s != human_seat]
+            if mention_targets:
+                mention_cols = st.columns(len(mention_targets))
+                for col, seat in zip(mention_cols, mention_targets):
+                    with col:
+                        if st.button(f"@{seat}", key=f"mention_btn_{seat}", use_container_width=True):
+                            current = (st.session_state.get(text_input_key) or "").strip()
+                            prefix = f"@{seat} "
+                            if not current.startswith(prefix):
+                                st.session_state[text_input_key] = (prefix + current)[:150]
 
             with col_form:
                 with st.form(
