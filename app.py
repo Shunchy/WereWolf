@@ -65,7 +65,7 @@ from prompts import (
 # ======================================================================
 load_dotenv()  # ローカル実行時: .env を読み込む
 
-MODEL_NAME = "google/gemma-4-31b-it:free"
+MODEL_NAME = "minimax/minimax-m3:free"
 BASE_URL = "https://openrouter.ai/api/v1"
 
 # ---- 音声入力(STT / OpenRouter Whisper) 関連設定 ----
