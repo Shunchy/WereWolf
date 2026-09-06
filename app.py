@@ -65,7 +65,7 @@ from prompts import (
 # ======================================================================
 load_dotenv()  # ローカル実行時: .env を読み込む
 
-MODEL_NAME = "minimax/minimax-m3:free"
+MODEL_NAME = "openrouter/free"
 BASE_URL = "https://openrouter.ai/api/v1"
 
 # ---- 音声入力(STT / OpenRouter Whisper) 関連設定 ----
@@ -74,6 +74,18 @@ BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_STT_MODEL_NAME = "openai/whisper-large-v3"
 
 SEATS = [f"AI-{i:02d}" for i in range(1, 6)]
+
+# 画面上に「現在のテーマ」として表示する呼び水（アイスブレイク用）。
+# ゲームの進行やAIの判定ロジックには一切影響しない、純粋な表示上の演出。
+# 実際の会話内容はこれまで通り完全に自由（テーマに沿う必要はない）。
+DISCUSSION_TOPICS = [
+    "AIは人間の仕事を奪うべきか？",
+    "もし明日から記憶が無くなるとしたら、何を最初にする？",
+    "AIに「心」は存在しうるか？",
+    "理想の1日の過ごし方とは？",
+    "人間らしさとは、結局何なのか？",
+    "もし1つだけ超能力が使えるなら？",
+]
 
 DAY_PHASE_SECONDS = 180          # 昼フェーズ（自由チャット）の制限時間（秒）
 AI_SPEAK_MIN_INTERVAL = 6        # AIが自発的に発言する最短間隔（秒）
@@ -996,6 +1008,279 @@ div.st-key-mic_recorder_wrap iframe {
     height: 40px !important;
     width: 100% !important;
 }
+
+/* ============================================================
+   追加: サイバーパンク強化テーマ / 新UIパーツ
+   ============================================================ */
+
+/* ---- グロー・グラデーションのメインタイトル ---- */
+.uai-glow-title {
+    font-family: 'JetBrains Mono', 'Courier New', monospace;
+    font-size: 64px;
+    font-weight: 800;
+    letter-spacing: 10px;
+    text-align: center;
+    background: linear-gradient(90deg, #6ea8fe, #a084ee, #e879c9);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    filter: drop-shadow(0 0 22px rgba(126, 132, 255, 0.35));
+    animation: uai-pulse 3.2s ease-in-out infinite;
+    margin-bottom: 4px;
+}
+
+/* ---- 5体シルエット行（タイトル画面） ---- */
+.silhouette-row {
+    display: flex;
+    justify-content: center;
+    gap: 18px;
+    margin: 28px 0;
+    flex-wrap: wrap;
+}
+.silhouette-slot {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+}
+.silhouette-icon {
+    width: 56px;
+    height: 56px;
+    border-radius: 50%;
+    background: radial-gradient(circle at 50% 30%, #232a3a, #10131a);
+    border: 1px solid #3a4a6e;
+    box-shadow: 0 0 14px rgba(110, 168, 254, 0.25);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 20px;
+    color: #6ea8fe;
+}
+.silhouette-label {
+    font-size: 11px;
+    letter-spacing: 2px;
+    color: #7d8aa0;
+}
+
+/* ---- 概要カード（タイトル画面） ---- */
+.overview-card-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 12px;
+    margin: 18px 0;
+}
+.overview-card {
+    border: 1px solid #2a2f4a;
+    background: linear-gradient(160deg, #121527, #0b0d16);
+    border-radius: 10px;
+    padding: 14px 16px;
+    text-align: center;
+}
+.overview-card-label {
+    font-size: 11px;
+    letter-spacing: 2px;
+    color: #7d8aa0;
+    margin-bottom: 6px;
+}
+.overview-card-value {
+    font-size: 16px;
+    font-weight: 700;
+    color: #cfe0ff;
+}
+
+/* ---- ゲーム画面ヘッダーカード ---- */
+.header-card {
+    border: 1px solid #2a2f4a;
+    background: linear-gradient(160deg, #121527, #0b0d16);
+    border-radius: 12px;
+    padding: 14px 18px;
+    height: 100%;
+}
+.header-card-label {
+    font-size: 11px;
+    letter-spacing: 2px;
+    color: #7d8aa0;
+    margin-bottom: 6px;
+}
+.header-theme-badge {
+    display: inline-block;
+    font-size: 11px;
+    letter-spacing: 1px;
+    color: #a084ee;
+    border: 1px solid #a084ee66;
+    background: #1a1530;
+    border-radius: 20px;
+    padding: 2px 10px;
+    margin-bottom: 8px;
+}
+.header-theme-text {
+    font-size: 16px;
+    font-weight: 700;
+    color: #eaf0ff;
+    line-height: 1.5;
+}
+.header-rules-list {
+    font-size: 12px;
+    color: #9aa4ad;
+    line-height: 1.9;
+}
+
+/* ---- タイマーリング ---- */
+.timer-ring-label {
+    font-size: 10px;
+    letter-spacing: 2px;
+    color: #7d8aa0;
+    text-align: center;
+    margin-bottom: 2px;
+}
+
+/* ---- 発言の感情タグ・タイムスタンプ ---- */
+.emotion-tag {
+    font-size: 10px;
+    letter-spacing: 1px;
+    color: #6ea8fe;
+    border: 1px solid #6ea8fe55;
+    background: #0f1830;
+    border-radius: 10px;
+    padding: 1px 8px;
+    margin-left: 2px;
+}
+.msg-timestamp {
+    font-size: 10px;
+    color: #5a6272;
+    margin-left: 8px;
+    font-weight: 400;
+    letter-spacing: 0;
+}
+
+/* ---- プレイヤー一覧パネル ---- */
+.player-panel-card {
+    border: 1px solid #2a2f4a;
+    background: linear-gradient(160deg, #121527, #0b0d16);
+    border-radius: 12px;
+    padding: 14px 16px;
+    margin-bottom: 14px;
+}
+.player-panel-title {
+    font-size: 12px;
+    letter-spacing: 2px;
+    color: #7fd3c7;
+    font-weight: 700;
+    margin-bottom: 10px;
+}
+.player-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 2px;
+    border-bottom: 1px solid #1c2035;
+}
+.player-row:last-child { border-bottom: none; }
+.player-avatar {
+    width: 34px;
+    height: 34px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    font-weight: 700;
+    flex-shrink: 0;
+    border: 1px solid #3a4a6e;
+    background: #171b2c;
+    color: #cfe0ff;
+}
+.player-row.self .player-avatar {
+    border-color: #6ea8fe;
+    box-shadow: 0 0 10px #6ea8fe66;
+}
+.player-row.dead { opacity: 0.4; }
+.player-info { flex: 1; min-width: 0; }
+.player-name-line {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    font-weight: 700;
+    color: #eaf0ff;
+}
+.player-you-tag {
+    font-size: 10px;
+    color: #6ea8fe;
+    border: 1px solid #6ea8fe66;
+    border-radius: 8px;
+    padding: 0 6px;
+}
+.player-badge {
+    font-size: 11px;
+    color: #9aa4ad;
+    margin-top: 2px;
+}
+.status-indicator {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #4fd6a8;
+    box-shadow: 0 0 6px #4fd6a8aa;
+    flex-shrink: 0;
+}
+.status-indicator.dead { background: #4a4f55; box-shadow: none; }
+.status-indicator.speaking {
+    background: #f0c674;
+    box-shadow: 0 0 8px #f0c674cc;
+    animation: uai-blink 1s ease-in-out infinite;
+}
+@keyframes uai-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+
+/* ---- 音声再生キュー ---- */
+.voice-queue-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    color: #9aa4ad;
+    padding: 6px 2px;
+    border-bottom: 1px solid #1c2035;
+}
+.voice-queue-item:last-child { border-bottom: none; }
+.voice-queue-item.current { color: #f0c674; }
+.voice-queue-icon { width: 14px; text-align: center; flex-shrink: 0; }
+.voice-queue-text { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.voice-queue-dur { font-size: 10px; color: #5a6272; flex-shrink: 0; }
+
+/* ---- ゲームステータス ---- */
+.status-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+}
+.status-grid-item {
+    border: 1px solid #1c2035;
+    border-radius: 8px;
+    padding: 8px 10px;
+}
+.status-grid-label {
+    font-size: 10px;
+    color: #7d8aa0;
+    letter-spacing: 1px;
+    margin-bottom: 4px;
+}
+.status-grid-value {
+    font-size: 15px;
+    font-weight: 700;
+    color: #eaf0ff;
+}
+.influence-track {
+    height: 6px;
+    background: #1a1d2c;
+    border-radius: 3px;
+    overflow: hidden;
+    margin-top: 6px;
+}
+.influence-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #6ea8fe, #e879c9);
+}
 </style>
 """
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
@@ -1053,6 +1338,9 @@ def initialize_game():
     # プレイヤーには一切表示されないが、発言のトーン・話し方に反映される。
     personalities = random.sample(PERSONALITY_POOL, len(seats))
     st.session_state.seat_personalities = dict(zip(seats, personalities))
+
+    # 画面表示用の「現在のテーマ」（アイスブレイク。会話は引き続き完全に自由）。
+    st.session_state.discussion_topic = random.choice(DISCUSSION_TOPICS)
 
     # 占い師AIがこれまでに調査して判明した正体（座席名 → 役職）。
     # ゲーム全体を通して蓄積され、人間プレイヤーには一切表示されない。
@@ -1122,9 +1410,120 @@ if "aizuchi_cache" not in st.session_state:
     st.session_state.aizuchi_cache = {}
 
 
+def render_player_panel():
+    """
+    「プレイヤー一覧」「音声再生キュー」「ゲームステータス」パネル。
+
+    デザイン参考画像では画面右側の専用カラムに配置されているが、それを
+    実現するにはチャット描画・発言処理ロジック全体を1つの列(with句)の中に
+    包み直す必要があり、かなり大掛かりで既存ロジックを壊すリスクが高い。
+    st.sidebarはスクリプト内のどこからでも呼び出せて常に独立した領域に
+    表示されるため、ここではサイドバー（左側の折りたたみ可能な領域）に
+    同じ内容を配置することで、既存の発言処理フローに一切手を加えずに
+    実現している。
+    """
+    if "seat_roles" not in st.session_state:
+        return
+
+    human_seat = st.session_state.human_seat
+    alive = st.session_state.get("alive", [])
+    personalities = st.session_state.get("seat_personalities", {})
+    speaking_now = set(st.session_state.get("pending_speakers", []))
+
+    # ---- プレイヤー一覧 ----
+    st.markdown('<div class="player-panel-card">', unsafe_allow_html=True)
+    st.markdown('<div class="player-panel-title">◈ プレイヤー一覧</div>', unsafe_allow_html=True)
+    rows_html = ""
+    for seat in SEATS:
+        is_self = seat == human_seat
+        is_alive = seat in alive
+        is_speaking = seat in speaking_now
+        row_cls = "player-row" + (" self" if is_self else "") + ("" if is_alive else " dead")
+        status_cls = "status-indicator" + (" dead" if not is_alive else (" speaking" if is_speaking else ""))
+        name_label = f"YOU ({seat})" if is_self else seat
+        you_tag = '<span class="player-you-tag">あなた</span>' if is_self else ""
+        p = personalities.get(seat)
+        badge = p.get("name", "") if isinstance(p, dict) else ""
+        rows_html += f"""
+        <div class="{row_cls}">
+            <div class="player-avatar">{seat.split('-')[-1]}</div>
+            <div class="player-info">
+                <div class="player-name-line">{name_label} {you_tag}</div>
+                <div class="player-badge">{badge}</div>
+            </div>
+            <div class="{status_cls}"></div>
+        </div>
+        """
+    st.markdown(rows_html, unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    # ---- 音声再生キュー（直近の再生履歴） ----
+    queue_log = st.session_state.get("voice_queue_log", [])
+    if queue_log:
+        st.markdown('<div class="player-panel-card">', unsafe_allow_html=True)
+        st.markdown('<div class="player-panel-title">◈ 音声再生キュー</div>', unsafe_allow_html=True)
+        items_html = ""
+        for i, item in enumerate(reversed(queue_log[-6:])):
+            cls = "voice-queue-item" + (" current" if i == 0 else "")
+            icon = "🔊" if i == 0 else "✓"
+            items_html += f"""
+            <div class="{cls}">
+                <span class="voice-queue-icon">{icon}</span>
+                <span class="voice-queue-text">{item['seat']}: {item['snippet']}</span>
+                <span class="voice-queue-dur">{item['dur']:.0f}s</span>
+            </div>
+            """
+        st.markdown(items_html, unsafe_allow_html=True)
+        st.markdown('<div style="font-size:10px; color:#5a6272; margin-top:4px;">※ 直近の再生履歴です</div>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    # ---- ゲームステータス ----
+    day = st.session_state.get("day", 1)
+    today_msgs = [
+        e for e in st.session_state.get("chat_log", [])
+        if e.get("day") == day and e.get("seat") != "SYSTEM"
+    ]
+    total_msgs = len(today_msgs)
+    your_msgs = len([e for e in today_msgs if e.get("seat") == human_seat])
+    share_pct = round(your_msgs / total_msgs * 100) if total_msgs else 0
+    elapsed_label = "--:--"
+    if st.session_state.get("day_phase_start") and st.session_state.get("phase") == "day":
+        elapsed = int(max(0, min(DAY_PHASE_SECONDS, time.time() - st.session_state.day_phase_start)))
+        elapsed_label = f"{elapsed // 60:02d}:{elapsed % 60:02d}"
+
+    st.markdown('<div class="player-panel-card">', unsafe_allow_html=True)
+    st.markdown('<div class="player-panel-title">◈ ゲームステータス</div>', unsafe_allow_html=True)
+    st.markdown(
+        f"""
+        <div class="status-grid">
+            <div class="status-grid-item">
+                <div class="status-grid-label">DAY</div>
+                <div class="status-grid-value">{day}</div>
+            </div>
+            <div class="status-grid-item">
+                <div class="status-grid-label">経過時間</div>
+                <div class="status-grid-value">{elapsed_label}</div>
+            </div>
+            <div class="status-grid-item">
+                <div class="status-grid-label">本日の発言数</div>
+                <div class="status-grid-value">{total_msgs}</div>
+            </div>
+            <div class="status-grid-item">
+                <div class="status-grid-label">あなたの発言シェア</div>
+                <div class="status-grid-value">{share_pct}%</div>
+                <div class="influence-track"><div class="influence-fill" style="width:{share_pct}%;"></div></div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.markdown('</div>', unsafe_allow_html=True)
+
+
 def render_voice_sidebar():
-    """サイドバーに音声読み上げのON/OFFトグルを表示する。"""
+    """サイドバーに、プレイヤー一覧パネルと音声読み上げのON/OFFトグルを表示する。"""
     with st.sidebar:
+        render_player_panel()
         st.markdown("### 🔊 音声設定")
         fish_key_present = bool(get_fish_api_key())
         if not fish_key_present:
@@ -1150,9 +1549,9 @@ def render_voice_sidebar():
 def render_title_screen():
     st.markdown(
         """
-        <div class="title-wrap">
+        <div class="title-wrap" style="padding-top:24px;">
             <div class="title-eyebrow">SOCIAL DEDUCTION SYSTEM</div>
-            <div class="title-main">UAI</div>
+            <div class="uai-glow-title">UAI</div>
             <div class="title-sub">U N I D E N T I F I E D &middot; A I</div>
         </div>
         """,
@@ -1169,61 +1568,104 @@ def render_title_screen():
         unsafe_allow_html=True,
     )
 
-    st.write("")
-    st.markdown('<div class="section-label">◈ 役職構成（5名・非公開）</div>', unsafe_allow_html=True)
-    st.markdown(
+    # 5体のシルエット行。座席は「ゲームを開始する」を押した瞬間に
+    # initialize_game() 内でランダムに割り当てられるため、この時点では
+    # まだ誰が何番か（あなたがどこか）は決まっておらず、"????" のまま表示する。
+    slots_html = "".join(
+        f"""
+        <div class="silhouette-slot">
+            <div class="silhouette-icon">?</div>
+            <div class="silhouette-label">????</div>
+        </div>
         """
-        <div class="role-card you">
-            <div class="role-card-title">🧑 人間（あなた）× 1</div>
-            <div class="role-card-desc">AIに擬態して生き残るのが目的。会話では「人間らしさ」を隠しきってください。</div>
-        </div>
-        <div class="role-card emulator">
-            <div class="role-card-title">🤖 エミュレーター（特殊AI）× 1</div>
-            <div class="role-card-desc">人間のふりをして疑いを集める撹乱役。あなたが生き残れば同時勝利になります。</div>
-        </div>
-        <div class="role-card seer">
-            <div class="role-card-title">🔮 占い師AI（特殊AI）× 1</div>
-            <div class="role-card-desc">夜の間、密かに1名の正体を調査できる一般AI側の隠し役職。その能力は誰にも公表されません。</div>
-        </div>
-        <div class="role-card ai">
-            <div class="role-card-title">🤖 一般AI × 2</div>
-            <div class="role-card-desc">会話の矛盾や「人間らしすぎる」発言から本物の人間を見つけ出し、追放するのが目的。</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
+        for _ in SEATS
     )
+    st.markdown(f'<div class="silhouette-row">{slots_html}</div>', unsafe_allow_html=True)
 
-    st.write("")
-    st.markdown('<div class="section-label">◈ 進行ルール</div>', unsafe_allow_html=True)
+    # ゲーム概要カード
     st.markdown(
         f"""
-        <div class="flow-step">
-            <div class="flow-step-num">☀</div>
-            <div>
-                <div class="flow-step-body-title">自由議論フェーズ</div>
-                <div class="flow-step-body-desc">決まった議題はありません。制限時間内、自由にチャットして誰が人間かを探ってください。</div>
+        <div class="overview-card-grid">
+            <div class="overview-card">
+                <div class="overview-card-label">プレイ人数</div>
+                <div class="overview-card-value">{len(SEATS)}人（AI×{len(SEATS) - 1} + あなた）</div>
             </div>
-        </div>
-        <div class="flow-step">
-            <div class="flow-step-num">🌙</div>
-            <div>
-                <div class="flow-step-body-title">投票フェーズ</div>
-                <div class="flow-step-body-desc">全員が「人間だと思う相手」に投票し、最多票の1名が追放されます。確信が持てなければ「{SKIP_LABEL_JP}」を選ぶこともできます（同数の場合や全員スキップの場合は誰も追放されず、次の日へ進みます）。</div>
+            <div class="overview-card">
+                <div class="overview-card-label">制限時間</div>
+                <div class="overview-card-value">{DAY_PHASE_SECONDS // 60}分間 / 日</div>
+            </div>
+            <div class="overview-card">
+                <div class="overview-card-label">目的</div>
+                <div class="overview-card-value">AIに紛れて見破られず生き残る</div>
+            </div>
+            <div class="overview-card">
+                <div class="overview-card-label">フェーズ構成</div>
+                <div class="overview-card-value">自由議論 → 投票</div>
             </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    st.markdown(
-        """
-        <div style="text-align:center; color:#8a939b; font-size:12px;
-                    margin-top:8px; letter-spacing:1px;">
-        人間が追放されれば一般AI側の勝利、生き残り続ければあなた（と、もしかしたらエミュレーター）の勝利です。
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    st.write("")
+    with st.expander("📖 ルール / 役職説明", expanded=False):
+        st.markdown('<div class="section-label">◈ 役職構成（5名・非公開）</div>', unsafe_allow_html=True)
+        st.markdown(
+            """
+            <div class="role-card you">
+                <div class="role-card-title">🧑 人間（あなた）× 1</div>
+                <div class="role-card-desc">AIに擬態して生き残るのが目的。会話では「人間らしさ」を隠しきってください。</div>
+            </div>
+            <div class="role-card emulator">
+                <div class="role-card-title">🤖 エミュレーター（特殊AI）× 1</div>
+                <div class="role-card-desc">人間のふりをして疑いを集める撹乱役。あなたが生き残れば同時勝利になります。</div>
+            </div>
+            <div class="role-card seer">
+                <div class="role-card-title">🔮 占い師AI（特殊AI）× 1</div>
+                <div class="role-card-desc">夜の間、密かに1名の正体を調査できる一般AI側の隠し役職。その能力は誰にも公表されません。</div>
+            </div>
+            <div class="role-card ai">
+                <div class="role-card-title">🤖 一般AI × 2</div>
+                <div class="role-card-desc">会話の矛盾や「人間らしすぎる」発言から本物の人間を見つけ出し、追放するのが目的。</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        st.write("")
+        st.markdown('<div class="section-label">◈ 進行ルール</div>', unsafe_allow_html=True)
+        st.markdown(
+            f"""
+            <div class="flow-step">
+                <div class="flow-step-num">☀</div>
+                <div>
+                    <div class="flow-step-body-title">自由議論フェーズ</div>
+                    <div class="flow-step-body-desc">決まった議題はありません。制限時間内、自由にチャットして誰が人間かを探ってください。</div>
+                </div>
+            </div>
+            <div class="flow-step">
+                <div class="flow-step-num">🌙</div>
+                <div>
+                    <div class="flow-step-body-title">投票フェーズ</div>
+                    <div class="flow-step-body-desc">全員が「人間だと思う相手」に投票し、最多票の1名が追放されます。確信が持てなければ「{SKIP_LABEL_JP}」を選ぶこともできます（同数の場合や全員スキップの場合は誰も追放されず、次の日へ進みます）。</div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        st.markdown(
+            """
+            <div style="text-align:center; color:#8a939b; font-size:12px;
+                        margin-top:8px; letter-spacing:1px;">
+            人間が追放されれば一般AI側の勝利、生き残り続ければあなた（と、もしかしたらエミュレーター）の勝利です。
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    with st.expander("🏆 実績 / ランキング", expanded=False):
+        st.caption("この機能は準備中です。プレイ記録の保存・ランキング表示は今後のアップデートで追加予定です。")
 
     st.write("")
     render_mobile_audio_unlock_button()
@@ -1244,25 +1686,62 @@ def render_title_screen():
 def render_header():
     st.markdown(
         """
-        <div style="display:flex; align-items:center; gap:10px; margin-bottom:2px;">
-            <span style="font-size:20px; letter-spacing:3px; color:#e7ecf0; font-weight:700;">◈ UAI</span>
+        <div style="display:flex; align-items:center; gap:10px; margin-bottom:10px;">
+            <span class="uai-glow-title" style="font-size:26px; letter-spacing:4px;">UAI</span>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
     phase = st.session_state.phase
+    game_over = st.session_state.get("game_over", False)
     phase_cls = "day" if phase == "day" else "night"
     phase_label = "☀ 自由議論フェーズ" if phase == "day" else "🌙 投票フェーズ"
-    st.markdown(
-        f"""
-        <div class="phase-bar">
-            <span class="phase-badge {phase_cls}">{phase_label}</span>
-            <span class="phase-meta">DAY {st.session_state.day}　｜　あなたのID: {st.session_state.human_seat}</span>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+
+    if phase == "day" and not game_over:
+        # サイバーパンク調のヘッダーカード行: テーマ / 残り時間（リング） / ルール＋終了ボタン
+        col_theme, col_timer, col_rule = st.columns([2, 1, 1.3], gap="medium")
+        with col_theme:
+            st.markdown(
+                f"""
+                <div class="header-card">
+                    <div class="header-card-label">DAY {st.session_state.day}　｜　現在のテーマ</div>
+                    <div class="header-theme-badge">{phase_label}</div>
+                    <div class="header-theme-text">{st.session_state.get("discussion_topic", "")}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        with col_timer:
+            deadline = st.session_state.day_phase_start + DAY_PHASE_SECONDS
+            render_client_side_timer(deadline, DAY_PHASE_SECONDS)
+        with col_rule:
+            st.markdown(
+                f"""
+                <div class="header-card">
+                    <div class="header-card-label">◈ ルール</div>
+                    <div class="header-rules-list">
+                        ・{DAY_PHASE_SECONDS // 60}分間で自由に議論しよう<br>
+                        ・誰が「本物の人間」か見破ろう
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            if st.button("⏻ ゲームを終了する", key="header_exit_btn", use_container_width=True):
+                for k in list(st.session_state.keys()):
+                    del st.session_state[k]
+                st.rerun()
+    else:
+        st.markdown(
+            f"""
+            <div class="phase-bar">
+                <span class="phase-badge {phase_cls}">{phase_label}</span>
+                <span class="phase-meta">DAY {st.session_state.day}　｜　あなたのID: {st.session_state.human_seat}</span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
     chips = ""
     for s in SEATS:
@@ -1278,7 +1757,31 @@ def render_header():
     st.markdown(f'<div class="status-bar">{chips}</div>', unsafe_allow_html=True)
 
 
-def render_statement_card(seat, text):
+_EMOTION_KEYWORDS = [
+    ("excited", ("！", "!", "よし", "さあ", "始め")),
+    ("smirking", ("笑", "ふふ", "なるほどね", "おっと")),
+    ("thinking", ("？", "?", "かな", "だろうか", "気になる")),
+    ("calm", ("確かに", "そうだね", "落ち着")),
+    ("observing", ("見て", "観察", "様子")),
+]
+
+
+def guess_emotion_tag(text: str) -> str:
+    """
+    発言テキストから、表示用の感情タグを簡易的に推測する。
+    LLMによる本格的な感情分析ではなく、記号や頻出語による軽い見た目上の
+    演出（チャット画面に[calm]や[thinking]のようなラベルを添えるだけ）。
+    ゲームの判定やAIの挙動には一切使わない。
+    """
+    if not text:
+        return "calm"
+    for tag, keywords in _EMOTION_KEYWORDS:
+        if any(kw in text for kw in keywords):
+            return tag
+    return "calm"
+
+
+def render_statement_card(seat, text, emotion=None, ts=None):
     if seat == "SYSTEM":
         st.markdown(
             f"""<div style="text-align:center; margin:16px 0;">
@@ -1298,10 +1801,12 @@ def render_statement_card(seat, text):
     name_cls = "seat-name self" if is_self else "seat-name"
     suffix = "（あなた）" if is_self else ""
     icon = "🧑" if is_self else "🤖"
+    emotion_html = f'<span class="emotion-tag">[{emotion}]</span>' if emotion else ""
+    ts_html = f'<span class="msg-timestamp">{ts}</span>' if ts else ""
     st.markdown(
         f"""<div class="{row_cls}">
                 <div class="{card_cls}">
-                    <div class="{name_cls}"><span class="seat-avatar">{icon}</span>{seat} {suffix}</div>
+                    <div class="{name_cls}"><span class="seat-avatar">{icon}</span>{seat} {suffix}{emotion_html}{ts_html}</div>
                     <div class="seat-text">{text}</div>
                 </div>
             </div>""",
@@ -1366,7 +1871,7 @@ def render_mobile_audio_unlock_button():
         background:#1f6f5c; color:#fff; border:none; border-radius:8px;
         padding:10px 16px; font-size:14px; cursor:pointer; width:100%;
         font-family:inherit;
-    ">🔊 音声を有効にする</button>
+    ">🔊 音声を有効にする（スマホの方は必ずタップしてください）</button>
     <script>
     document.getElementById("uai-unlock-btn").addEventListener("click", function() {{
         var btn = this;
@@ -1414,7 +1919,7 @@ def _silent_wav_bytes(duration_sec=0.15, sample_rate=8000):
     return buf.getvalue()
 
 
-def play_clip_and_wait(clip_bytes, dock=None, extra_delay=AUDIO_SLEEP_BUFFER_SECONDS):
+def play_clip_and_wait(clip_bytes, dock=None, seat=None, snippet_text=None, extra_delay=AUDIO_SLEEP_BUFFER_SECONDS):
     """
     音声クリップを1つ再生し、その音声の実際の長さ分だけ処理を止めて待つ。
 
@@ -1458,7 +1963,15 @@ def play_clip_and_wait(clip_bytes, dock=None, extra_delay=AUDIO_SLEEP_BUFFER_SEC
         return
     target = dock if dock is not None else st
     target.audio(clip_bytes, format="audio/mp3", autoplay=True)
-    time.sleep(get_mp3_duration_seconds(clip_bytes) + extra_delay)
+    duration = get_mp3_duration_seconds(clip_bytes)
+    if seat is not None:
+        # サイドバーの「音声再生キュー」パネル用に、直近の再生履歴を記録しておく
+        # （表示用の演出。ゲーム進行やAIの判定には使わない）。
+        queue_log = st.session_state.setdefault("voice_queue_log", [])
+        snippet = (snippet_text or "")[:22] + ("…" if snippet_text and len(snippet_text) > 22 else "")
+        queue_log.append({"seat": seat, "snippet": snippet, "dur": duration})
+        st.session_state["voice_queue_log"] = queue_log[-12:]
+    time.sleep(duration + extra_delay)
 
 
 def render_manual_replay_button():
@@ -1476,25 +1989,39 @@ def render_client_side_timer(deadline_epoch, total_seconds):
     """
     サーバーへの再実行(rerun)を発生させない、ブラウザ内だけで動くカウントダウン表示。
     タイマー更新のたびに画面全体がちらつく問題を避けるために使用する。
+    円形のリング（SVGのstroke-dashoffsetをJSで更新）で残り時間を表現する。
     """
     deadline_ms = int(deadline_epoch * 1000)
     total_ms = int(total_seconds * 1000)
+    radius = 46
+    circumference = 2 * 3.14159265 * radius
     html = f"""
-    <div style="font-family:'JetBrains Mono','Courier New',monospace;">
-      <div style="border:1px solid #2a2f36;background-color:#12151a;padding:10px 16px;
-                  margin-bottom:10px;display:flex;justify-content:space-between;align-items:center;
-                  color:#d7dbe0;border-radius:4px;">
-        <span>⏱ 残り時間</span>
-        <span id="rw_timer_text" style="font-size:20px;font-weight:700;">--:--</span>
-      </div>
-      <div style="height:6px;background:#20242a;border-radius:3px;overflow:hidden;margin-bottom:6px;">
-        <div id="rw_timer_bar" style="height:100%;background:#7fd3c7;width:100%;"></div>
+    <div style="font-family:'JetBrains Mono','Courier New',monospace;
+                display:flex; flex-direction:column; align-items:center;">
+      <div style="font-size:10px; letter-spacing:2px; color:#7d8aa0; margin-bottom:4px;">残り時間</div>
+      <div style="position:relative; width:112px; height:112px;">
+        <svg width="112" height="112" style="transform:rotate(-90deg);">
+          <circle cx="56" cy="56" r="{radius}" fill="none" stroke="#1c2035" stroke-width="8"></circle>
+          <circle id="rw_timer_ring" cx="56" cy="56" r="{radius}" fill="none"
+                  stroke="url(#rw_timer_grad)" stroke-width="8" stroke-linecap="round"
+                  stroke-dasharray="{circumference:.2f}" stroke-dashoffset="0"></circle>
+          <defs>
+            <linearGradient id="rw_timer_grad" x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" stop-color="#6ea8fe"></stop>
+              <stop offset="100%" stop-color="#e879c9"></stop>
+            </linearGradient>
+          </defs>
+        </svg>
+        <div style="position:absolute; inset:0; display:flex; align-items:center; justify-content:center;">
+          <span id="rw_timer_text" style="font-size:22px; font-weight:700; color:#eaf0ff;">--:--</span>
+        </div>
       </div>
     </div>
     <script>
       (function() {{
         const deadline = {deadline_ms};
         const total = {total_ms};
+        const circumference = {circumference:.2f};
         function tick() {{
           const now = Date.now();
           const remaining = Math.max(0, deadline - now);
@@ -1502,9 +2029,12 @@ def render_client_side_timer(deadline_epoch, total_seconds):
           const mm = String(Math.floor(s / 60)).padStart(2, '0');
           const ss = String(s % 60).padStart(2, '0');
           const textEl = document.getElementById('rw_timer_text');
-          const barEl = document.getElementById('rw_timer_bar');
+          const ringEl = document.getElementById('rw_timer_ring');
           if (textEl) textEl.textContent = mm + ':' + ss;
-          if (barEl) barEl.style.width = Math.max(0, Math.min(100, (remaining / total) * 100)) + '%';
+          if (ringEl) {{
+            const frac = Math.max(0, Math.min(1, remaining / total));
+            ringEl.setAttribute('stroke-dashoffset', String(circumference * (1 - frac)));
+          }}
           if (remaining <= 0) clearInterval(iv);
         }}
         tick();
@@ -1512,7 +2042,7 @@ def render_client_side_timer(deadline_epoch, total_seconds):
       }})();
     </script>
     """
-    components.html(html, height=60)
+    components.html(html, height=140)
 
 
 def reset_game_button():
@@ -1571,13 +2101,12 @@ def render_day_phase():
     remaining = max(0.0, deadline - time.time())
     time_up = (remaining <= 0) or st.session_state.force_end_day
 
-    render_client_side_timer(deadline, DAY_PHASE_SECONDS)
-    st.caption("議題は決まっていません。自由に会話して、誰が「本物の人間」か探ってください。")
+    st.caption("上のテーマはあくまで呼び水です。テーマに縛られず自由に会話して、誰が「本物の人間」か探ってください。")
 
     # 表示は「本日分」の発言のみに絞る（AIへ渡す文脈は日をまたいだ全履歴を使う）。
     for entry in st.session_state.chat_log:
         if entry.get("day") == st.session_state.day:
-            render_statement_card(entry["seat"], entry["text"])
+            render_statement_card(entry["seat"], entry["text"], entry.get("emotion"), entry.get("ts"))
 
     # --- AIの音声を再生するための固定枠 ---
     # 発言入力欄と同じ「画面下部に常に固定される」コンテナ(st.bottom)の中に、
@@ -1659,7 +2188,10 @@ def render_day_phase():
     # --- 1) プレイヤーが発言した場合は最優先で処理する ---
     if user_msg:
         text = user_msg.strip()[:150]
-        st.session_state.chat_log.append({"day": st.session_state.day, "seat": human_seat, "text": text})
+        st.session_state.chat_log.append({
+            "day": st.session_state.day, "seat": human_seat, "text": text,
+            "emotion": guess_emotion_tag(text), "ts": time.strftime("%H:%M:%S"),
+        })
         alive_ai_seats = [s for s in alive if s != human_seat]
         # 通信はまだ行わず「誰が反応するか」だけ確定し、即座に再描画する
         st.session_state.pending_speakers = decide_speakers(alive_ai_seats)
@@ -1727,11 +2259,15 @@ def render_day_phase():
 
             # 発言のテキストは、その音声が再生され始める「今」確定・表示する
             # （音声が無い/失敗した場合も、ここで即座にテキストだけ表示する）。
-            st.session_state.chat_log.append({"day": st.session_state.day, "seat": seat, "text": text})
-            render_statement_card(seat, text)
+            emotion = guess_emotion_tag(text)
+            ts = time.strftime("%H:%M:%S")
+            st.session_state.chat_log.append(
+                {"day": st.session_state.day, "seat": seat, "text": text, "emotion": emotion, "ts": ts}
+            )
+            render_statement_card(seat, text, emotion, ts)
 
             for clip in valid_clips:
-                play_clip_and_wait(clip, dock=audio_dock)
+                play_clip_and_wait(clip, dock=audio_dock, seat=seat, snippet_text=text)
                 replay_clips.append(clip)
                 any_played = True
 
@@ -1790,7 +2326,7 @@ def render_night_phase():
     with st.expander("📄 本日の会話を振り返る", expanded=False):
         for entry in st.session_state.chat_log:
             if entry.get("day") == st.session_state.day:
-                render_statement_card(entry["seat"], entry["text"])
+                render_statement_card(entry["seat"], entry["text"], entry.get("emotion"), entry.get("ts"))
 
     candidates = [s for s in alive if s != human_seat]
 
