@@ -66,6 +66,24 @@ SYSTEM_PROMPTS = {
 }
 
 # ----------------------------------------------------------------------
+# 返信タイミングに関する注意事項
+# ----------------------------------------------------------------------
+# 「返信が遅い／沈黙している」ことだけを理由に人間だと判断されるのを防ぐための
+# 注意書き。特定の座席が今まさに入力中かどうかをAIごとに個別通知する仕組みは、
+# 座席ごとの応答速度の違いという形でどうしても人間の座席が分かってしまう
+# （AIは即座に生成されるのに対し、人間だけ実際にキー入力の時間がかかるため）。
+# そのため、誰が・いつ入力中かという具体情報は一切与えず、代わりに
+# 「間や沈黙は誰にでも起こり得るので、それ単体を人間らしさの根拠にしない」
+# という一般的な心構えを全AI・毎ターン共通で持たせることで対応する。
+TIMING_CAUTION_NOTE = (
+    "\n\n【発言タイミングについての注意】発言までに間が空いたり、しばらく沈黙が"
+    "続いたりすることは、人間・AIを問わず誰にでも起こり得ます。考えを整理したり、"
+    "他の発言を待ってから発言するのは自然な行動です。返信の速さや沈黙の長さ"
+    "そのものを『人間らしさ』の根拠にするのは早計です。判断はあくまで発言の"
+    "内容（矛盾、具体性のなさ、不自然な言い回しなど）に基づいて行ってください。"
+)
+
+# ----------------------------------------------------------------------
 # 個性（キャラクター性）定義
 # ----------------------------------------------------------------------
 # ゲーム開始時に各AI座席へランダムに1つ割り当てる。役職とは独立した「話し方・態度のクセ」で、
@@ -164,7 +182,7 @@ def build_chat_reply_messages(role, seat_name, day, chat_log, alive_seats, perso
 情報の出どころを説明したり、能力の存在を示唆したりするのは絶対に禁止です）
 {facts_lines}"""
 
-    system_prompt = base_system + _personality_block(personality) + facts_block
+    system_prompt = base_system + _personality_block(personality) + facts_block + TIMING_CAUTION_NOTE
     history_lines = _format_chat_log(chat_log)
 
     user_prompt = f"""現在 Day {day}。生存メンバー: {', '.join(alive_seats)}
@@ -206,7 +224,7 @@ def build_vote_messages(role, seat_name, day, chat_log, vote_candidates, known_f
 【あなただけが知る調査結果】（他の誰にも明かされていない秘密の情報です。投票の判断に活用してください）
 {facts_lines}"""
 
-    vote_system = base_system + _personality_block(personality) + facts_block + f"""
+    vote_system = base_system + _personality_block(personality) + facts_block + TIMING_CAUTION_NOTE + f"""
 
 これから投票を行います。あなたは「本物の人間」だと思う相手を1名だけ選んでください。
 根拠が弱く確信が持てない場合は、無理に誰かを選ばず投票を見送ってもかまいません。
@@ -249,7 +267,7 @@ def build_seer_investigation_messages(seat_name, day, chat_log, investigate_cand
 【あなただけが知る、これまでの調査結果】（他の誰にも明かされていない秘密の情報です）
 {facts_lines}"""
 
-    system_prompt = base_system + _personality_block(personality) + facts_block + f"""
+    system_prompt = base_system + _personality_block(personality) + facts_block + TIMING_CAUTION_NOTE + f"""
 
 これから夜になり、あなたは今夜調査する相手を1名だけ密かに選びます。
 これまでの会話の中で最も『人間らしい』違和感や矛盾を感じた相手、
