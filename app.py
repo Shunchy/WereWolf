@@ -75,18 +75,6 @@ DEFAULT_STT_MODEL_NAME = "openai/whisper-large-v3"
 
 SEATS = [f"AI-{i:02d}" for i in range(1, 6)]
 
-# 画面上に「現在のテーマ」として表示する呼び水（アイスブレイク用）。
-# ゲームの進行やAIの判定ロジックには一切影響しない、純粋な表示上の演出。
-# 実際の会話内容はこれまで通り完全に自由（テーマに沿う必要はない）。
-DISCUSSION_TOPICS = [
-    "AIは人間の仕事を奪うべきか？",
-    "もし明日から記憶が無くなるとしたら、何を最初にする？",
-    "AIに「心」は存在しうるか？",
-    "理想の1日の過ごし方とは？",
-    "人間らしさとは、結局何なのか？",
-    "もし1つだけ超能力が使えるなら？",
-]
-
 DAY_PHASE_SECONDS = 180          # 昼フェーズ（自由チャット）の制限時間（秒）
 AI_SPEAK_MIN_INTERVAL = 6        # AIが自発的に発言する最短間隔（秒）
 AI_SPEAK_MAX_INTERVAL = 12       # AIが自発的に発言する最長間隔（秒）
@@ -1339,9 +1327,6 @@ def initialize_game():
     personalities = random.sample(PERSONALITY_POOL, len(seats))
     st.session_state.seat_personalities = dict(zip(seats, personalities))
 
-    # 画面表示用の「現在のテーマ」（アイスブレイク。会話は引き続き完全に自由）。
-    st.session_state.discussion_topic = random.choice(DISCUSSION_TOPICS)
-
     # 占い師AIがこれまでに調査して判明した正体（座席名 → 役職）。
     # ゲーム全体を通して蓄積され、人間プレイヤーには一切表示されない。
     st.session_state.seer_investigations = {}
@@ -1711,15 +1696,15 @@ def render_header():
     phase_label = "☀ 自由議論フェーズ" if phase == "day" else "🌙 投票フェーズ"
 
     if phase == "day" and not game_over:
-        # サイバーパンク調のヘッダーカード行: テーマ / 残り時間（リング） / ルール＋終了ボタン
-        col_theme, col_timer, col_rule = st.columns([2, 1, 1.3], gap="medium")
-        with col_theme:
+        # サイバーパンク調のヘッダーカード行: フェーズ状況 / 残り時間（リング） / ルール＋終了ボタン
+        col_status, col_timer, col_rule = st.columns([2, 1, 1.3], gap="medium")
+        with col_status:
             st.markdown(
                 f"""
                 <div class="header-card">
-                    <div class="header-card-label">DAY {st.session_state.day}　｜　現在のテーマ</div>
+                    <div class="header-card-label">DAY {st.session_state.day}</div>
                     <div class="header-theme-badge">{phase_label}</div>
-                    <div class="header-theme-text">{st.session_state.get("discussion_topic", "")}</div>
+                    <div class="header-theme-text">自由に会話して、誰が「本物の人間」か見破ろう</div>
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -2113,7 +2098,7 @@ def render_day_phase():
     remaining = max(0.0, deadline - time.time())
     time_up = (remaining <= 0) or st.session_state.force_end_day
 
-    st.caption("上のテーマはあくまで呼び水です。テーマに縛られず自由に会話して、誰が「本物の人間」か探ってください。")
+    st.caption("議題は決まっていません。自由に会話して、誰が「本物の人間」か探ってください。")
 
     # 表示は「本日分」の発言のみに絞る（AIへ渡す文脈は日をまたいだ全履歴を使う）。
     for entry in st.session_state.chat_log:
