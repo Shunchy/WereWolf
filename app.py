@@ -2217,20 +2217,23 @@ def render_day_phase():
                     )
 
             # --- 特定のAIに話しかけたい時のためのクイック指名ボタン ---
-            # 押すと発言欄の先頭に「@AI-0X 」を挿入する（既存の下書きは消さない）。
-            # st.button()はst.formの外にあるので、押してもclear_on_submitで
-            # 下書きが消えることはない。ウィジェット生成前にsession_stateへ
-            # 値をセットする必要があるため、st.text_input()より前に置く。
+            # 押すと発言欄にそのAIの名前（例: AI-01）をそのまま入力する。
+            # あえて「既存の下書きに追記する」ようなことはせず、単純に
+            # 上書きするだけにしている。以前は下書きの内容を読み取って
+            # 連結していたが、フォーム送信後にこちらから明示的にst.rerun()を
+            # 呼んでいる関係で、Streamlit側のclear_on_submitのリセットと
+            # タイミングが噛み合わず、直前に送信したはずの発言のテキストが
+            # 消えないまま残ってしまうことがあった。その状態でボタンを押すと、
+            # 残っていた古いテキストに指名がくっついて表示される、という
+            # 不具合が起きていた。値を読み取らずシンプルに上書きするだけの
+            # 方式にすることで、この不具合の原因ごと無くしている。
             mention_targets = [s for s in alive if s != human_seat]
             if mention_targets:
                 mention_cols = st.columns(len(mention_targets))
                 for col, seat in zip(mention_cols, mention_targets):
                     with col:
-                        if st.button(f"@{seat}", key=f"mention_btn_{seat}", use_container_width=True):
-                            current = (st.session_state.get(text_input_key) or "").strip()
-                            prefix = f"@{seat} "
-                            if not current.startswith(prefix):
-                                st.session_state[text_input_key] = (prefix + current)[:150]
+                        if st.button(seat, key=f"mention_btn_{seat}", use_container_width=True):
+                            st.session_state[text_input_key] = seat
 
             with col_form:
                 with st.form(
