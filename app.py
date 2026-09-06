@@ -1444,16 +1444,23 @@ def render_player_panel():
         you_tag = '<span class="player-you-tag">あなた</span>' if is_self else ""
         p = personalities.get(seat)
         badge = p.get("name", "") if isinstance(p, dict) else ""
-        rows_html += f"""
-        <div class="{row_cls}">
-            <div class="player-avatar">{seat.split('-')[-1]}</div>
-            <div class="player-info">
-                <div class="player-name-line">{name_label} {you_tag}</div>
-                <div class="player-badge">{badge}</div>
-            </div>
-            <div class="{status_cls}"></div>
-        </div>
-        """
+        # 注意: このHTMLは必ず1行（内部に改行を含めない）で組み立てること。
+        # 複数のdivブロックをループでf"""...""" (複数行) のまま連結すると、
+        # 各断片の先頭/末尾に残る改行+インデントが「空行」として扱われ、
+        # Markdown側がそこでHTMLブロックの継続を打ち切ってしまう。
+        # その結果、2つ目以降の断片が「インデント付きコードブロック」と
+        # 誤認識され、タグがそのまま文字として表示されてしまう
+        # （実際に発生した不具合）。
+        rows_html += (
+            f'<div class="{row_cls}">'
+            f'<div class="player-avatar">{seat.split("-")[-1]}</div>'
+            f'<div class="player-info">'
+            f'<div class="player-name-line">{name_label} {you_tag}</div>'
+            f'<div class="player-badge">{badge}</div>'
+            f'</div>'
+            f'<div class="{status_cls}"></div>'
+            f'</div>'
+        )
     st.markdown(rows_html, unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -1466,13 +1473,14 @@ def render_player_panel():
         for i, item in enumerate(reversed(queue_log[-6:])):
             cls = "voice-queue-item" + (" current" if i == 0 else "")
             icon = "🔊" if i == 0 else "✓"
-            items_html += f"""
-            <div class="{cls}">
-                <span class="voice-queue-icon">{icon}</span>
-                <span class="voice-queue-text">{item['seat']}: {item['snippet']}</span>
-                <span class="voice-queue-dur">{item['dur']:.0f}s</span>
-            </div>
-            """
+            # 上と同じ理由で、1行のまま組み立てる。
+            items_html += (
+                f'<div class="{cls}">'
+                f'<span class="voice-queue-icon">{icon}</span>'
+                f'<span class="voice-queue-text">{item["seat"]}: {item["snippet"]}</span>'
+                f'<span class="voice-queue-dur">{item["dur"]:.0f}s</span>'
+                f'</div>'
+            )
         st.markdown(items_html, unsafe_allow_html=True)
         st.markdown('<div style="font-size:10px; color:#5a6272; margin-top:4px;">※ 直近の再生履歴です</div>', unsafe_allow_html=True)
         st.markdown('</div>', unsafe_allow_html=True)
@@ -1571,13 +1579,17 @@ def render_title_screen():
     # 5体のシルエット行。座席は「ゲームを開始する」を押した瞬間に
     # initialize_game() 内でランダムに割り当てられるため、この時点では
     # まだ誰が何番か（あなたがどこか）は決まっておらず、"????" のまま表示する。
+    # 注意: 各スロットは必ず1行（内部に改行を含めない）で組み立てること。
+    # 複数行のf"""...\"\"\"を"".join()で連結すると、各断片の先頭/末尾に
+    # 残る改行+インデントが空行として扱われ、Markdown側がそこでHTML
+    # ブロックの継続を打ち切ってしまう。その結果、2つ目以降の断片が
+    # 「インデント付きコードブロック」と誤認識され、タグがそのまま
+    # 文字として表示されてしまう（実際に発生した不具合）。
     slots_html = "".join(
-        f"""
-        <div class="silhouette-slot">
-            <div class="silhouette-icon">?</div>
-            <div class="silhouette-label">????</div>
-        </div>
-        """
+        '<div class="silhouette-slot">'
+        '<div class="silhouette-icon">?</div>'
+        '<div class="silhouette-label">????</div>'
+        '</div>'
         for _ in SEATS
     )
     st.markdown(f'<div class="silhouette-row">{slots_html}</div>', unsafe_allow_html=True)
