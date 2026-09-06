@@ -2186,6 +2186,16 @@ def render_day_phase():
     #   このブロックは必ず下の st.text_input より前に置く必要がある）。
     text_input_key = f"chat_input_area_{st.session_state.day}"
 
+    # 直前の実行で発言が送信されていた場合、ここで確実に発言欄を空にする。
+    # st.form(clear_on_submit=True)自体も送信後にクリアしてくれるはずだが、
+    # このアプリでは送信直後に手動でst.rerun()を呼んでおり、そのタイミングと
+    # 噛み合わず、送信したはずの文章が発言欄に残ってしまうことがあった
+    # （「@指名ボタンを押すと直前の発言がくっついてくる」不具合の原因）。
+    # ここで明示的にリセットしておくことで、指名ボタン側は安心して
+    # 「今の下書きの続きに追記する」だけのシンプルな実装にできる。
+    if st.session_state.pop("_just_submitted_chat", False):
+        st.session_state[text_input_key] = ""
+
     user_msg = None
     if not time_up:
         with st.bottom:
@@ -2217,23 +2227,20 @@ def render_day_phase():
                     )
 
             # --- 特定のAIに話しかけたい時のためのクイック指名ボタン ---
-            # 押すと発言欄にそのAIの名前（例: AI-01）をそのまま入力する。
-            # あえて「既存の下書きに追記する」ようなことはせず、単純に
-            # 上書きするだけにしている。以前は下書きの内容を読み取って
-            # 連結していたが、フォーム送信後にこちらから明示的にst.rerun()を
-            # 呼んでいる関係で、Streamlit側のclear_on_submitのリセットと
-            # タイミングが噛み合わず、直前に送信したはずの発言のテキストが
-            # 消えないまま残ってしまうことがあった。その状態でボタンを押すと、
-            # 残っていた古いテキストに指名がくっついて表示される、という
-            # 不具合が起きていた。値を読み取らずシンプルに上書きするだけの
-            # 方式にすることで、この不具合の原因ごと無くしている。
+            # 押すと発言欄の今の下書きの末尾に、そのAIの名前（例: AI-01）を
+            # 付け足す。以前は「送信直後の古いテキストが発言欄に残ったまま
+            # 指名がくっついて表示される」不具合があったが、その原因（発言欄を
+            # 確実に空にできていなかったこと）は上の_just_submitted_chat
+            # フラグ処理で解消済みのため、ここでは安心して素直に追記できる。
             mention_targets = [s for s in alive if s != human_seat]
             if mention_targets:
                 mention_cols = st.columns(len(mention_targets))
                 for col, seat in zip(mention_cols, mention_targets):
                     with col:
                         if st.button(seat, key=f"mention_btn_{seat}", use_container_width=True):
-                            st.session_state[text_input_key] = seat
+                            current = (st.session_state.get(text_input_key) or "").rstrip()
+                            merged = f"{current} {seat}" if current else seat
+                            st.session_state[text_input_key] = merged[:150]
 
             with col_form:
                 with st.form(
@@ -2266,6 +2273,11 @@ def render_day_phase():
         alive_ai_seats = [s for s in alive if s != human_seat]
         # 通信はまだ行わず「誰が反応するか」だけ確定し、即座に再描画する
         st.session_state.pending_speakers = decide_speakers(alive_ai_seats)
+        # フォームのclear_on_submitに加えて、次の描画で発言欄を確実に空へ
+        # リセットするための印。ここでこのrun内のtext_input_keyを直接
+        # 空にすることはできない（このrun内で既にウィジェットが生成済みの
+        # ため）ので、次のrunの冒頭（ウィジェット生成より前）で処理する。
+        st.session_state["_just_submitted_chat"] = True
         st.rerun()
         return
 
