@@ -1701,10 +1701,10 @@ def render_header():
         with col_status:
             st.markdown(
                 f"""
-                <div class="header-card">
+                <div class="header-card" style="display:flex; flex-direction:column;
+                            align-items:center; justify-content:center; text-align:center; height:100%;">
                     <div class="header-card-label">DAY {st.session_state.day}</div>
-                    <div class="header-theme-badge">{phase_label}</div>
-                    <div class="header-theme-text">自由に会話して、誰が「本物の人間」か見破ろう</div>
+                    <div class="header-theme-badge" style="margin-bottom:0;">{phase_label}</div>
                 </div>
                 """,
                 unsafe_allow_html=True,
