@@ -1865,7 +1865,7 @@ def render_mobile_audio_unlock_button():
         background:#1f6f5c; color:#fff; border:none; border-radius:8px;
         padding:10px 16px; font-size:14px; cursor:pointer; width:100%;
         font-family:inherit;
-    ">🔊 音声を有効にする（スマホの方は必ずタップしてください）</button>
+    ">🔊 音声を有効にする</button>
     <script>
     document.getElementById("uai-unlock-btn").addEventListener("click", function() {{
         var btn = this;
