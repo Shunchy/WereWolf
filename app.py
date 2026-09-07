@@ -30,11 +30,10 @@ import uuid
 import wave
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-import requests
 import streamlit as st
 import streamlit.components.v1 as components
 from dotenv import load_dotenv
-from openai import OpenAI
+from openai import OpenAI, APIConnectionError, APITimeoutError, InternalServerError, RateLimitError
 from streamlit_autorefresh import st_autorefresh
 
 from tts import (
@@ -343,22 +342,48 @@ def looks_japanese(text: str) -> bool:
     return bool(text) and bool(_JAPANESE_CHAR_RE.search(text))
 
 
-def call_llm(messages, max_tokens=300, temperature=0.9):
+def call_llm(messages, max_tokens=300, temperature=0.9, max_retries=2, retry_backoff=1.0):
+    """
+    一時的なエラー（レート制限・タイムアウト・サーバー側5xx）に限り、
+    自動的に数回リトライする。
+
+    「Day 2になるとAIが急に「考えがまとまらない」というフォールバック発言
+    ばかりになる」という不具合の原因調査より: 夜フェーズ→次の日への
+    切り替わりのタイミングでは、占い師AIの調査・全員分の投票判断・
+    その日の話題生成など、短時間にLLM呼び出しが集中して発生する。
+    無料枠モデルはレート制限に達しやすく、そこで1回失敗すると、
+    以前は間隔を空けずに即座にリトライしていたため、同じレート制限の
+    ウィンドウ内で再び失敗し、3回とも失敗してフォールバック発言に
+    落ちてしまっていた（Day 1は開始直後にそこまでの呼び出しが集中しない
+    ため、症状が出にくかったと考えられる）。ここで少し間隔を空けてから
+    リトライすることで、レート制限が解除されるのを待ってから再試行できる。
+
+    認証エラーなど、リトライしても解決しない種類のエラーは即座に諦める。
+    """
     client = get_client()
-    try:
-        resp = client.chat.completions.create(
-            model=MODEL_NAME,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            messages=messages,
-        )
-        content = resp.choices[0].message.content or ""
-        return content.strip()
-    except Exception as e:
-        # LLM_TIMEOUT_SECONDS を超えると、ここで例外として捕捉され、
-        # 「考え中」のまま止まることなく処理が先に進む。
-        _record_debug_error("LLM呼び出し", e)
-        return f"[通信エラー: {e}]"
+    last_error = None
+    for attempt in range(max_retries + 1):
+        try:
+            resp = client.chat.completions.create(
+                model=MODEL_NAME,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                messages=messages,
+            )
+            content = resp.choices[0].message.content or ""
+            return content.strip()
+        except (RateLimitError, APITimeoutError, APIConnectionError, InternalServerError) as e:
+            last_error = e
+            if attempt < max_retries:
+                time.sleep(retry_backoff * (attempt + 1))
+                continue
+        except Exception as e:
+            # LLM_TIMEOUT_SECONDS を超えると、ここで例外として捕捉され、
+            # 「考え中」のまま止まることなく処理が先に進む。
+            _record_debug_error("LLM呼び出し", e)
+            return f"[通信エラー: {e}]"
+    _record_debug_error("LLM呼び出し", last_error)
+    return f"[通信エラー: {last_error}]"
 
 
 def generate_discussion_topic() -> str:
@@ -395,41 +420,6 @@ def generate_discussion_topic() -> str:
     if candidate and not is_comm_error and looks_japanese(candidate) and len(candidate) <= 60:
         return candidate
     return random.choice(DISCUSSION_TOPICS)
-
-
-
-    """
-    call_llm のストリーミング版。OpenRouterからテキストが断片(delta)で
-    届くたびに on_delta(delta) を呼び出す。
-    現在は音声合成が発言単位の一括生成に変わったため直接は使っていないが、
-    ストリーミングが必要になった場合のために残してある。
-    通信エラー時は例外を送出せず、call_llm と同じ形式の
-    "[通信エラー: ...]" という文字列を返す。
-    """
-    client = get_client()
-    text_parts = []
-    try:
-        stream = client.chat.completions.create(
-            model=MODEL_NAME,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            messages=messages,
-            stream=True,
-        )
-        for event in stream:
-            delta = ""
-            try:
-                delta = event.choices[0].delta.content or ""
-            except Exception:
-                delta = ""
-            if delta:
-                text_parts.append(delta)
-                if on_delta:
-                    on_delta(delta)
-        return "".join(text_parts).strip()
-    except Exception as e:
-        _record_debug_error("LLM呼び出し(streaming)", e)
-        return f"[通信エラー: {e}]"
 
 
 def call_ai_chat_reply(role, seat_name, day, chat_log, alive_seats, personality=None, known_facts=None):
