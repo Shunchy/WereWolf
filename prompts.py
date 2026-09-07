@@ -163,10 +163,11 @@ def _format_chat_log(chat_log, limit=30):
 # ----------------------------------------------------------------------
 # 自由チャット発言生成プロンプト
 # ----------------------------------------------------------------------
-def build_chat_reply_messages(role, seat_name, day, chat_log, alive_seats, personality=None, known_facts=None):
+def build_chat_reply_messages(role, seat_name, day, chat_log, alive_seats, personality=None, known_facts=None, topic=None):
     """
     自由チャット形式の発言生成用メッセージ（system, user）を構築する。
-    固定の議題は与えず、これまでの会話ログ（日をまたいだ全履歴）の流れに沿って自然に発言させる。
+    topicが渡された場合はその日の話題の"種"として提示するが、話が脱線して
+    雑談になること自体は禁止しない（あくまで話のきっかけ）。
     personality: このAIに割り当てられた個性辞書（{"name":..., "desc":...}）。省略可。
     known_facts: 占い師AI自身が既に掴んでいる調査結果のリスト（文字列）。占い師AI以外は通常None。
     """
@@ -185,8 +186,17 @@ def build_chat_reply_messages(role, seat_name, day, chat_log, alive_seats, perso
     system_prompt = base_system + _personality_block(personality) + facts_block + TIMING_CAUTION_NOTE
     history_lines = _format_chat_log(chat_log)
 
+    if topic:
+        topic_block = f"""本日の話題（きっかけとして提示されているだけで、必ず従う必要はありません）: 「{topic}」
+話が脱線して全く別の雑談になってもかまいませんが、特に会話の最初のほうでは、この話題について
+自分なりの考えや具体的なエピソードを交えて話してみてください。当たり障りのない相槌だけで
+終わらせず、具体性のある発言を心がけてください。"""
+    else:
+        topic_block = "議題は決まっていません。自由に会話してください。"
+
     user_prompt = f"""現在 Day {day}。生存メンバー: {', '.join(alive_seats)}
-議題は決まっていません。以下はこれまでの自由な会話ログです（日をまたいだ全履歴。[Day N]が会話が行われた日）。
+{topic_block}
+以下はこれまでの自由な会話ログです（日をまたいだ全履歴。[Day N]が会話が行われた日）。
 
 --- ここまでの会話 ---
 {history_lines}
