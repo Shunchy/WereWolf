@@ -33,7 +33,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 import streamlit as st
 import streamlit.components.v1 as components
-from streamlit_mic_recorder import mic_recorder
 from dotenv import load_dotenv
 from openai import OpenAI
 from streamlit_autorefresh import st_autorefresh
@@ -65,13 +64,8 @@ from prompts import (
 # ======================================================================
 load_dotenv()  # ローカル実行時: .env を読み込む
 
-MODEL_NAME = "openrouter/free"
+MODEL_NAME = "minimax/minimax-m2.7:free"
 BASE_URL = "https://openrouter.ai/api/v1"
-
-# ---- 音声入力(STT / OpenRouter Whisper) 関連設定 ----
-# OpenRouterの /audio/transcriptions エンドポイント用モデル。
-# LLM呼び出しと同じ base_url・APIキーで叩けるため、専用のAPIキーは不要。
-DEFAULT_STT_MODEL_NAME = "openai/whisper-large-v3"
 
 SEATS = [f"AI-{i:02d}" for i in range(1, 6)]
 
@@ -150,145 +144,113 @@ def get_client():
     )
 
 
-def get_stt_model_name() -> str:
-    """音声入力(文字起こし)に使うOpenRouterのモデル名。未設定ならデフォルトを使う。"""
-    name = ""
-    try:
-        name = st.secrets.get("OPENROUTER_STT_MODEL", "")
-    except Exception:
-        name = ""
-    if not name:
-        name = os.getenv("OPENROUTER_STT_MODEL", "")
-    return name or DEFAULT_STT_MODEL_NAME
-
-
-def _sniff_audio_format(data: bytes) -> str:
+def render_web_speech_input_button():
     """
-    音声バイト列の先頭バイト（マジックナンバー）から実際のフォーマットを判定する。
+    ブラウザに内蔵された音声認識(Web Speech API)を使った、完全無料の音声入力ボタン。
 
-    「音声入力のバグ」の一因として、streamlit-mic-recorderにformat="wav"を
-    指定しても、インストールされているバージョンによっては変換が効かず、
-    ブラウザが実際に録音した形式（多くの場合webm/opus）のバイト列が
-    そのまま返ってくることがある。それにもかかわらず呼び出し側が
-    「wavのはず」と信じてOpenRouterに送ってしまうと、実体と申告形式が
-    食い違い、サーバー側でのデコードに失敗して毎回文字起こしが失敗する。
-    これを避けるため、ライブラリの自己申告(format)は参考程度にし、
-    実際のバイト列を見て判定した結果を優先して使う。
+    経緯: これまではstreamlit-mic-recorderで録音し、OpenRouterの文字起こし
+    APIに音声データを送っていたが、OpenRouterの音声系エンドポイントは
+    アカウントに$0.50以上のクレジット残高が無いと使えない仕様
+    （HTTP 402エラー）だった。無料で使いたいという要望のため、
+    音声データを一切サーバーに送らず、ブラウザ自身が持っている音声認識
+    エンジン（Chrome/Edge/Safariなど）だけで完結する方式に切り替えた。
+    料金は一切かからず、APIキーの追加設定も不要。
+
+    制約（正直な注意点）:
+      - Web Speech APIはFirefoxでは使えない（Chromium系・Safari系で動作）。
+      - マイクの権限が必要（初回はブラウザがポップアップで確認する）。
+      - 認識精度はサーバー型のWhisperよりやや劣ることがある。
+      - 認識結果は発言欄の末尾に追記される。
+
+    実装:
+      components.v1.html()のiframeの中でSpeechRecognitionを実行し、
+      結果が出た瞬間に window.parent.document から実際の発言欄
+      （aria-label="発言を入力"のinput要素）を探し出して値を書き換える。
+      Reactの管理下にある入力なので、単純に.valueを書き換えるだけでは
+      画面に反映されない（Reactが変更を検知できない）ため、ネイティブの
+      value setterを使ってから'input'イベントを発火させる、という
+      一般的な回避策を使っている。
     """
-    if not data:
-        return "wav"
-    if data[:4] == b"RIFF":
-        return "wav"
-    if data[:4] == b"\x1a\x45\xdf\xa3":
-        return "webm"
-    if data[:4] == b"OggS":
-        return "ogg"
-    if data[:3] == b"ID3" or (len(data) > 1 and data[0] == 0xFF and (data[1] & 0xE0) == 0xE0):
-        return "mp3"
-    return "wav"
+    html = """
+    <button id="uai-speech-btn" type="button" style="
+        background:#1f6f5c; color:#fff; border:none; border-radius:8px;
+        padding:0; font-size:18px; cursor:pointer; width:100%; height:40px;
+        font-family:inherit;
+    ">🎤</button>
+    <script>
+    (function() {
+        const btn = document.getElementById("uai-speech-btn");
+        const SpeechRecognition = window.webkitSpeechRecognition || window.SpeechRecognition;
+        if (!SpeechRecognition) {
+            btn.innerText = "🎤(非対応)";
+            btn.disabled = true;
+            btn.style.opacity = "0.5";
+            btn.title = "このブラウザは音声認識に対応していません（Chrome/Edge/Safariをお試しください）";
+            return;
+        }
+        const recognition = new SpeechRecognition();
+        recognition.lang = "ja-JP";
+        recognition.interimResults = false;
+        recognition.maxAlternatives = 1;
+        let listening = false;
 
+        function setReactValue(el, value) {
+            const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+            setter.call(el, value);
+            el.dispatchEvent(new Event("input", { bubbles: true }));
+        }
 
-def transcribe_audio(audio_bytes: bytes, fmt: str = "wav") -> str:
+        function findChatInput(doc) {
+            return doc.querySelector('input[aria-label="発言を入力"]')
+                || doc.querySelector('input[placeholder="発言を入力（150文字以内）..."]');
+        }
+
+        recognition.onresult = function(event) {
+            const text = event.results[0][0].transcript;
+            try {
+                const doc = window.parent.document;
+                const input = findChatInput(doc);
+                if (input) {
+                    const current = (input.value || "").trim();
+                    const merged = (current ? current + " " : "") + text;
+                    setReactValue(input, merged.slice(0, 150));
+                }
+            } catch (e) {
+                console.error("[UAI] speech input error:", e);
+            }
+        };
+        recognition.onend = function() {
+            listening = false;
+            btn.innerText = "🎤";
+            btn.style.background = "#1f6f5c";
+        };
+        recognition.onerror = function(event) {
+            console.error("[UAI] speech recognition error:", event.error);
+            listening = false;
+            btn.innerText = "🎤";
+            btn.style.background = "#1f6f5c";
+        };
+        btn.addEventListener("click", function() {
+            if (listening) {
+                recognition.stop();
+                return;
+            }
+            listening = true;
+            btn.innerText = "⏹";
+            btn.style.background = "#b33a3a";
+            try {
+                recognition.start();
+            } catch (e) {
+                console.error("[UAI] speech recognition start failed:", e);
+                listening = false;
+                btn.innerText = "🎤";
+                btn.style.background = "#1f6f5c";
+            }
+        });
+    })();
+    </script>
     """
-    録音した音声バイト列を、OpenRouterの音声文字起こしエンドポイント
-    (POST /audio/transcriptions、Whisper系モデル)でテキストに変換する。
-
-    重要（「必ず聞き取り失敗になる」バグの原因と対策）:
-    以前はOpenAI Python SDKの client.audio.transcriptions.create(file=...) を
-    使っていたが、これは内部的に multipart/form-data 形式でアップロードする。
-    ところがOpenRouterの /audio/transcriptions エンドポイントは、
-    現状このmultipart経由のアップロードがゲートウェイ側で壊れており
-    （境界文字列のパースに失敗する既知の不具合）、毎回失敗していた。
-
-    OpenRouterが案内している、正しく動作する形式は「音声をbase64にして
-    JSONボディのinput_audioフィールドに乗せる」方式のため、ここでは
-    OpenAI SDKを経由せず、requestsで直接そのJSON形式のリクエストを送る。
-
-    fmt はあくまで参考値（呼び出し側が録音ライブラリから伝えられた形式）。
-    実際に送信するformatは、バイト列そのものを_sniff_audio_format()で
-    判定した結果を優先する（上記の「申告と実体の食い違い」対策）。
-
-    失敗した場合は空文字列を返す。呼び出し側で「うまく聞き取れませんでした」
-    という案内を出す想定だが、原因を追えるように、実際のエラー内容は
-    debug_errors（画面下部「通信の状態」）に記録している。
-    """
-    if not audio_bytes:
-        return ""
-    api_key = get_api_key()
-    if not api_key:
-        return ""
-    detected_fmt = _sniff_audio_format(audio_bytes)
-    send_fmt = detected_fmt or fmt or "wav"
-    try:
-        b64_audio = base64.b64encode(audio_bytes).decode("ascii")
-        resp = requests.post(
-            f"{BASE_URL}/audio/transcriptions",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-                "HTTP-Referer": "https://github.com/",
-                "X-Title": "Reverse Werewolf Game",
-            },
-            json={
-                "model": get_stt_model_name(),
-                "input_audio": {"data": b64_audio, "format": send_fmt},
-                "language": "ja",
-            },
-            timeout=30,  # 文字起こしは通常のLLM応答より時間がかかることがあるため長めに取る
-        )
-        if not resp.ok:
-            body = resp.text[:400]
-            _record_debug_error(
-                "音声入力の文字起こし",
-                f"HTTP {resp.status_code} (申告形式={fmt}, 判定形式={detected_fmt}) / {body}",
-            )
-            return ""
-        data = resp.json()
-        text = (data.get("text") or "").strip()
-        if not text:
-            _record_debug_error("音声入力の文字起こし", f"空の書き起こし結果が返りました（判定形式={detected_fmt}）")
-        return text
-    except Exception as e:
-        _record_debug_error("音声入力の文字起こし", f"{e}（申告形式={fmt}, 判定形式={detected_fmt}）")
-        return ""
-
-
-def record_voice_input():
-    """
-    streamlit-mic-recorderの「🎤」/「⏹」ボタンを描画する。
-    波形表示は無く、アイコンだけのシンプルなUI（発言欄の左に収まるよう、
-    テキストラベルは付けずアイコンのみにしている）。
-
-    just_once=True のため、録音が完了した直後の1回だけ音声データを返し、
-    以降のrerunでは（再録音するまで）Noneを返す。これにより、呼び出し側で
-    「同じ録音を何度も文字起こししてしまう」対策の重複チェックが不要になる。
-
-    format引数（wav指定）は比較的新しいバージョンのstreamlit-mic-recorderに
-    のみ存在するため、無い場合（古いバージョン）でも動くようフォールバックする。
-    録音そのもの（ここ）が失敗しているのか、文字起こし（transcribe_audio）が
-    失敗しているのかを区別できるよう、ここで起きた例外もdebug_errorsに残す。
-
-    戻り値: (音声バイト列, フォーマット文字列("wav"など)) または (None, None)。
-    """
-    kwargs = dict(
-        start_prompt="🎤",
-        stop_prompt="⏹",
-        just_once=True,
-        use_container_width=True,
-        key="voice_mic_recorder",
-    )
-    try:
-        try:
-            audio_dict = mic_recorder(format="wav", **kwargs)
-        except TypeError:
-            audio_dict = mic_recorder(**kwargs)
-    except Exception as e:
-        _record_debug_error("音声入力（録音ウィジェット）", e)
-        return None, None
-    if not audio_dict or not audio_dict.get("bytes"):
-        return None, None
-    return audio_dict["bytes"], audio_dict.get("format", "wav")
-
+    components.html(html, height=44)
 
 
 # ======================================================================
@@ -1083,18 +1045,6 @@ div.st-key-ai_voice_dock {
     height: 0 !important;
     margin: 0 !important;
     padding: 0 !important;
-}
-
-/* ---- マイク録音ボタン(streamlit-mic-recorder)の外枠を、発言欄と
-       高さを揃えて1つの入力バーのように見せる ---- */
-div.st-key-mic_recorder_wrap {
-    display: flex;
-    align-items: center;
-    height: 40px;
-}
-div.st-key-mic_recorder_wrap iframe {
-    height: 40px !important;
-    width: 100% !important;
 }
 
 /* ============================================================
@@ -2267,27 +2217,9 @@ def render_day_phase():
         with st.bottom:
             # マイクボタンは発言欄と同じ行の左側に置きたいので、列(col_mic)と
             # 発言欄側(col_form)を横に並べる形にしている。
-            # st.container(key=...) で囲むことで、CSS側から
-            # ".st-key-mic_recorder_wrap" として高さを発言欄に揃えられるように
-            # している（streamlit-mic-recorderは別iframeの独自UIのため、
-            # 中身のボタン自体の見た目までは変えられないが、外枠のサイズは
-            # 揃えられる）。
             col_mic, col_form = st.columns([1, 7], vertical_alignment="bottom")
             with col_mic:
-                with st.container(key="mic_recorder_wrap"):
-                    raw_bytes, rec_format = record_voice_input()
-
-            if raw_bytes:
-                with st.spinner("文字起こし中..."):
-                    transcribed = transcribe_audio(raw_bytes, fmt=rec_format or "wav")
-                if transcribed:
-                    st.session_state[text_input_key] = transcribed[:150]
-                else:
-                    last_error = st.session_state.get("debug_errors", [])[-1:] or ["詳細不明"]
-                    st.warning(
-                        "うまく聞き取れませんでした。もう一度録音するか、直接入力してください。\n\n"
-                        f"詳細: {last_error[0]}"
-                    )
+                render_web_speech_input_button()
 
             # --- 特定のAIに話しかけたい時のためのクイック指名ボタン ---
             # 押すと発言欄の今の下書きの末尾に、そのAIの名前（例: AI-01）を
