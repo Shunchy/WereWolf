@@ -2187,23 +2187,21 @@ def render_day_phase():
     text_input_key = f"chat_input_area_{st.session_state.day}"
 
     # 直前の実行で発言が送信されていた場合、ここで確実に発言欄を空にする。
-    # st.form(clear_on_submit=True)自体も送信後にクリアしてくれるはずだが、
-    # このアプリでは送信直後に手動でst.rerun()を呼んでおり、そのタイミングと
-    # 噛み合わず、送信したはずの文章が発言欄に残ってしまうことがあった
-    # （「@指名ボタンを押すと直前の発言がくっついてくる」不具合の原因）。
-    # ここで明示的にリセットしておくことで、指名ボタン側は安心して
-    # 「今の下書きの続きに追記する」だけのシンプルな実装にできる。
+    # 以前は st.form(clear_on_submit=True) に任せていたが、フォームの中の
+    # 値は「送信されるまでサーバー側に伝わらない」ため、送信後にマイク/指名
+    # ボタンなど別ウィジェットからこの値を読み書きしようとすると、ブラウザ側で
+    # 実際に見えている内容とサーバー側の認識がズレる問題があった
+    # （＝発言を送った後に指名ボタンを押すと、消したはずの古い文章が
+    # 蘇って表示される不具合の原因）。そのためst.formをやめてst.text_input単体
+    # にし、代わりにここで明示的にリセットしている。
     if st.session_state.pop("_just_submitted_chat", False):
         st.session_state[text_input_key] = ""
 
     user_msg = None
     if not time_up:
         with st.bottom:
-            # マイクボタンは発言欄と同じ行の左側に置きたいが、
-            # st.form の中では通常のst.button()が使えない（st.form_submit_button
-            # だと、押した瞬間にclear_on_submitで入力中の下書きまで消えてしまう）
-            # ため、フォームの外に置いた列(col_mic)とフォーム自体(col_form)を
-            # 横に並べる形にしている。
+            # マイクボタンは発言欄と同じ行の左側に置きたいので、列(col_mic)と
+            # 発言欄側(col_form)を横に並べる形にしている。
             # st.container(key=...) で囲むことで、CSS側から
             # ".st-key-mic_recorder_wrap" として高さを発言欄に揃えられるように
             # している（streamlit-mic-recorderは別iframeの独自UIのため、
@@ -2243,23 +2241,17 @@ def render_day_phase():
                             st.session_state[text_input_key] = merged[:150]
 
             with col_form:
-                with st.form(
-                    key="chat_form",
-                    clear_on_submit=True,
-                    enter_to_submit=False,
-                    border=False,
-                ):
-                    col_input, col_btn = st.columns([5, 1], vertical_alignment="bottom")
-                    with col_input:
-                        draft = st.text_input(
-                            "発言を入力",
-                            key=text_input_key,
-                            max_chars=150,
-                            label_visibility="collapsed",
-                            placeholder="発言を入力（150文字以内）...",
-                        )
-                    with col_btn:
-                        submitted = st.form_submit_button("送信", type="primary", use_container_width=True)
+                col_input, col_btn = st.columns([5, 1], vertical_alignment="bottom")
+                with col_input:
+                    draft = st.text_input(
+                        "発言を入力",
+                        key=text_input_key,
+                        max_chars=150,
+                        label_visibility="collapsed",
+                        placeholder="発言を入力（150文字以内）...",
+                    )
+                with col_btn:
+                    submitted = st.button("送信", key="chat_send_btn", type="primary", use_container_width=True)
         if submitted and draft and draft.strip():
             user_msg = draft
 
@@ -2273,10 +2265,10 @@ def render_day_phase():
         alive_ai_seats = [s for s in alive if s != human_seat]
         # 通信はまだ行わず「誰が反応するか」だけ確定し、即座に再描画する
         st.session_state.pending_speakers = decide_speakers(alive_ai_seats)
-        # フォームのclear_on_submitに加えて、次の描画で発言欄を確実に空へ
-        # リセットするための印。ここでこのrun内のtext_input_keyを直接
-        # 空にすることはできない（このrun内で既にウィジェットが生成済みの
-        # ため）ので、次のrunの冒頭（ウィジェット生成より前）で処理する。
+        # 次の描画で発言欄を確実に空へリセットするための印。ここでこのrun内の
+        # text_input_keyを直接空にすることはできない（このrun内で既に
+        # ウィジェットが生成済みのため）ので、次のrunの冒頭
+        # （ウィジェット生成より前）で処理する。
         st.session_state["_just_submitted_chat"] = True
         st.rerun()
         return
