@@ -75,6 +75,23 @@ DEFAULT_STT_MODEL_NAME = "openai/whisper-large-v3"
 
 SEATS = [f"AI-{i:02d}" for i in range(1, 6)]
 
+# ゲーム開始時にランダムで1つ選ばれ、その日の「話題」としてAIのプロンプトに
+# 実際に渡される（build_chat_reply_messages参照）。決まった議題が無いと
+# AIの発言が当たり障りのないものになりがちだったため、話の種として与える。
+# あくまで話題の"種"であり、雑談へ脱線すること自体は禁止しない。
+DISCUSSION_TOPICS = [
+    "AIは人間の仕事を奪うべきか？",
+    "もし明日から記憶が無くなるとしたら、何を最初にする？",
+    "AIに「心」は存在しうるか？",
+    "理想の1日の過ごし方とは？",
+    "人間らしさとは、結局何なのか？",
+    "もし1つだけ超能力が使えるなら？",
+    "一番好きな食べ物と、その理由は？",
+    "もしタイムマシンがあったら、いつの時代に行きたい？",
+    "頑張って続けていることはある？",
+    "最近、感動したことや面白かったことは？",
+]
+
 DAY_PHASE_SECONDS = 180          # 昼フェーズ（自由チャット）の制限時間（秒）
 AI_SPEAK_MIN_INTERVAL = 6        # AIが自発的に発言する最短間隔（秒）
 AI_SPEAK_MAX_INTERVAL = 12       # AIが自発的に発言する最長間隔（秒）
@@ -248,6 +265,8 @@ def record_voice_input():
 
     format引数（wav指定）は比較的新しいバージョンのstreamlit-mic-recorderに
     のみ存在するため、無い場合（古いバージョン）でも動くようフォールバックする。
+    録音そのもの（ここ）が失敗しているのか、文字起こし（transcribe_audio）が
+    失敗しているのかを区別できるよう、ここで起きた例外もdebug_errorsに残す。
 
     戻り値: (音声バイト列, フォーマット文字列("wav"など)) または (None, None)。
     """
@@ -259,9 +278,13 @@ def record_voice_input():
         key="voice_mic_recorder",
     )
     try:
-        audio_dict = mic_recorder(format="wav", **kwargs)
-    except TypeError:
-        audio_dict = mic_recorder(**kwargs)
+        try:
+            audio_dict = mic_recorder(format="wav", **kwargs)
+        except TypeError:
+            audio_dict = mic_recorder(**kwargs)
+    except Exception as e:
+        _record_debug_error("音声入力（録音ウィジェット）", e)
+        return None, None
     if not audio_dict or not audio_dict.get("bytes"):
         return None, None
     return audio_dict["bytes"], audio_dict.get("format", "wav")
@@ -376,7 +399,43 @@ def call_llm(messages, max_tokens=300, temperature=0.9):
         return f"[通信エラー: {e}]"
 
 
-def call_llm_stream(messages, max_tokens=300, temperature=0.9, on_delta=None):
+def generate_discussion_topic() -> str:
+    """
+    その日の話題をLLMにその場で1つ考えてもらう。
+    固定リスト(DISCUSSION_TOPICS)から選ぶだけだと同じ話題が何度も出てきて
+    飽きやすいため、毎回LLMに新しく考えてもらうことで話題のバリエーションを
+    増やす。通信エラーや、出力が不自然（空・日本語でない・長すぎるなど）
+    だった場合は、ゲームが止まらないよう固定リストへフォールバックする。
+    """
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "あなたは雑談ゲームの司会者です。5人が自由に話し合うきっかけとなる、"
+                "軽い雑談のお題を1つだけ考えます。"
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                "見知らぬ人同士5人が話すきっかけになるような、答えやすくて"
+                "盛り上がりやすい雑談のお題を1つ考えてください。"
+                "政治・宗教・特定の実在の人物・炎上しやすい話題は避けてください。\n"
+                "出力は日本語で、お題の文章だけを1行で出力してください"
+                "（前置き、番号、記号、カギ括弧などは一切付けないでください）。"
+                "30文字以内にしてください。"
+            ),
+        },
+    ]
+    raw = call_llm(messages, max_tokens=60, temperature=1.0)
+    candidate = raw.strip().strip("「」『』\"'　 ")
+    is_comm_error = candidate.startswith("[通信エラー")
+    if candidate and not is_comm_error and looks_japanese(candidate) and len(candidate) <= 60:
+        return candidate
+    return random.choice(DISCUSSION_TOPICS)
+
+
+
     """
     call_llm のストリーミング版。OpenRouterからテキストが断片(delta)で
     届くたびに on_delta(delta) を呼び出す。
@@ -421,7 +480,8 @@ def call_ai_chat_reply(role, seat_name, day, chat_log, alive_seats, personality=
     known_facts: 占い師AI自身が既に掴んでいる調査結果（占い師AI以外は通常None）。
     """
     messages = build_chat_reply_messages(
-        role, seat_name, day, chat_log, alive_seats, personality=personality, known_facts=known_facts
+        role, seat_name, day, chat_log, alive_seats, personality=personality, known_facts=known_facts,
+        topic=st.session_state.get("discussion_topic"),
     )
     text = ""
 
@@ -474,7 +534,8 @@ def call_ai_chat_reply_with_audio(
       （音声OFF、または合成に失敗した場合は空リスト）。
     """
     messages = build_chat_reply_messages(
-        role, seat_name, day, chat_log, alive_seats, personality=personality, known_facts=known_facts
+        role, seat_name, day, chat_log, alive_seats, personality=personality, known_facts=known_facts,
+        topic=st.session_state.get("discussion_topic"),
     )
     text = ""
     voice_on = bool(tts_api_key and tts_executor)
@@ -1333,6 +1394,8 @@ def reset_day_state():
     st.session_state.pending_elimination = None
     st.session_state.tie_result = False
     st.session_state.night_vote_draft = None
+    # 日が変わるたびに話題も新しく考え直す（毎日同じ話題だと飽きるため）。
+    st.session_state.discussion_topic = generate_discussion_topic()
 
 
 def initialize_game():
@@ -1696,12 +1759,14 @@ def render_header():
         # サイバーパンク調のヘッダーカード行: フェーズ状況 / 残り時間（リング） / ルール＋終了ボタン
         col_status, col_timer, col_rule = st.columns([2, 1, 1.3], gap="medium")
         with col_status:
+            topic = st.session_state.get("discussion_topic", "")
             st.markdown(
                 f"""
                 <div class="header-card" style="display:flex; flex-direction:column;
                             align-items:center; justify-content:center; text-align:center; height:100%;">
                     <div class="header-card-label">DAY {st.session_state.day}</div>
-                    <div class="header-theme-badge" style="margin-bottom:0;">{phase_label}</div>
+                    <div class="header-theme-badge">{phase_label}</div>
+                    <div class="header-theme-text">{topic}</div>
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -2151,7 +2216,7 @@ def render_day_phase():
     remaining = max(0.0, deadline - time.time())
     time_up = (remaining <= 0) or st.session_state.force_end_day
 
-    st.caption("議題は決まっていません。自由に会話して、誰が「本物の人間」か探ってください。")
+    st.caption("上のテーマは話のきっかけです。脱線してもかまいませんが、誰が「本物の人間」か探ってください。")
 
     # 表示は「本日分」の発言のみに絞る（AIへ渡す文脈は日をまたいだ全履歴を使う）。
     for entry in st.session_state.chat_log:
